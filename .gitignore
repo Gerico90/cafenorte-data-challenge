@@ -1,0 +1,10 @@
+# Local environment
+.env
+
+# Raw challenge data
+data/raw/*
+!data/raw/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
