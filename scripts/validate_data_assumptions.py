@@ -493,6 +493,322 @@ if explicit_conflicts:
     print(pd.DataFrame(explicit_conflicts).to_string(index=False))
 
 # ---------------------------------------------------------------------
+# 11. INVENTORY SNAPSHOT STRUCTURE
+# ---------------------------------------------------------------------
+
+section("11. INVENTORY SNAPSHOT STRUCTURE")
+
+snapshot_check = snapshots.copy()
+
+snapshot_check["fecha_dt"] = pd.to_datetime(snapshot_check["fecha"])
+snapshot_check["stock_numeric"] = pd.to_numeric(
+    snapshot_check["cantidad_en_stock"],
+    errors="coerce"
+)
+
+
+# ---------------------------------------------------------------------
+# Date coverage
+# ---------------------------------------------------------------------
+
+min_date = snapshot_check["fecha_dt"].min()
+max_date = snapshot_check["fecha_dt"].max()
+
+distinct_dates = snapshot_check["fecha_dt"].nunique()
+
+expected_dates = pd.date_range(
+    min_date,
+    max_date,
+    freq="D"
+)
+
+observed_dates = pd.DatetimeIndex(
+    snapshot_check["fecha_dt"].unique()
+)
+
+missing_dates = expected_dates.difference(observed_dates)
+
+print("\nDate coverage")
+print(f"first date: {min_date.date()}")
+print(f"last date: {max_date.date()}")
+print(f"distinct dates: {distinct_dates}")
+print(f"expected calendar days: {len(expected_dates)}")
+print(f"missing calendar days: {len(missing_dates)}")
+
+if len(missing_dates) > 0:
+    print("missing dates:", list(missing_dates))
+
+
+# ---------------------------------------------------------------------
+# Store-SKU pairs
+# ---------------------------------------------------------------------
+
+pair_day_counts = (
+    snapshot_check
+    .groupby(["tienda_id", "sku_erp"])["fecha_dt"]
+    .nunique()
+)
+
+print("\nStore-SKU pair coverage")
+print(f"unique store-SKU pairs: {len(pair_day_counts)}")
+print(f"minimum days per pair: {pair_day_counts.min()}")
+print(f"maximum days per pair: {pair_day_counts.max()}")
+print(f"median days per pair: {pair_day_counts.median()}")
+
+full_coverage_pairs = (pair_day_counts == distinct_dates).sum()
+partial_coverage_pairs = (pair_day_counts != distinct_dates).sum()
+
+print(f"pairs with all {distinct_dates} days: {full_coverage_pairs}")
+print(f"pairs with partial coverage: {partial_coverage_pairs}")
+
+
+# Show distribution if there are different coverage lengths
+print("\nDays-per-pair distribution:")
+print(
+    pair_day_counts
+    .value_counts()
+    .sort_index()
+    .to_string()
+)
+
+
+# ---------------------------------------------------------------------
+# Rows per day
+# ---------------------------------------------------------------------
+
+rows_per_day = (
+    snapshot_check
+    .groupby("fecha_dt")
+    .size()
+)
+
+print("\nRows per day")
+print(f"minimum rows/day: {rows_per_day.min()}")
+print(f"maximum rows/day: {rows_per_day.max()}")
+print(f"unique row-count values: {rows_per_day.nunique()}")
+
+print("\nRows/day distribution:")
+print(
+    rows_per_day
+    .value_counts()
+    .sort_index()
+    .to_string()
+)
+
+
+# ---------------------------------------------------------------------
+# Missing numeric stock ('N/A')
+# ---------------------------------------------------------------------
+
+na_mask = snapshot_check["stock_numeric"].isna()
+
+print("\nN/A stock distribution")
+print(f"N/A rows: {na_mask.sum()}")
+print(
+    "store-SKU pairs affected by N/A:",
+    snapshot_check.loc[
+        na_mask,
+        ["tienda_id", "sku_erp"]
+    ].drop_duplicates().shape[0]
+)
+print(
+    "stores affected by N/A:",
+    snapshot_check.loc[na_mask, "tienda_id"].nunique()
+)
+print(
+    "SKUs affected by N/A:",
+    snapshot_check.loc[na_mask, "sku_erp"].nunique()
+)
+print(
+    "dates affected by N/A:",
+    snapshot_check.loc[na_mask, "fecha_dt"].nunique()
+)
+
+
+# ---------------------------------------------------------------------
+# Actual zero stock
+# ---------------------------------------------------------------------
+
+zero_mask = snapshot_check["stock_numeric"] == 0
+
+print("\nZero-stock observations")
+print(f"zero-stock rows: {zero_mask.sum()}")
+print(
+    "store-SKU pairs with at least one zero:",
+    snapshot_check.loc[
+        zero_mask,
+        ["tienda_id", "sku_erp"]
+    ].drop_duplicates().shape[0]
+)
+print(
+    "stores with at least one zero:",
+    snapshot_check.loc[zero_mask, "tienda_id"].nunique()
+)
+print(
+    "SKUs with at least one zero:",
+    snapshot_check.loc[zero_mask, "sku_erp"].nunique()
+)
+
+# ---------------------------------------------------------------------
+# 12. INVENTORY MISSINGNESS BY STORE-SKU
+# ---------------------------------------------------------------------
+
+section("12. INVENTORY MISSINGNESS BY STORE-SKU")
+
+missing_by_pair = (
+    snapshot_check
+    .assign(is_na=snapshot_check["stock_numeric"].isna())
+    .groupby(["tienda_id", "sku_erp"])["is_na"]
+    .agg(["sum", "count"])
+)
+
+missing_by_pair["missing_pct"] = (
+    missing_by_pair["sum"] / missing_by_pair["count"] * 100
+)
+
+print("\nMissing stock per store-SKU pair")
+print(f"minimum N/A days: {missing_by_pair['sum'].min()}")
+print(f"maximum N/A days: {missing_by_pair['sum'].max()}")
+print(f"median N/A days: {missing_by_pair['sum'].median()}")
+print(f"mean N/A days: {missing_by_pair['sum'].mean():.2f}")
+
+print(
+    f"maximum missing percentage: "
+    f"{missing_by_pair['missing_pct'].max():.2f}%"
+)
+
+print("\nN/A-days-per-pair distribution:")
+print(
+    missing_by_pair["sum"]
+    .value_counts()
+    .sort_index()
+    .to_string()
+)
+
+print("\nTop 10 pairs by missing percentage:")
+print(
+    missing_by_pair
+    .sort_values("missing_pct", ascending=False)
+    .head(10)
+    .to_string()
+)
+
+# ---------------------------------------------------------------------
+# 13. SALES PRODUCT RECONCILIATION COVERAGE
+# ---------------------------------------------------------------------
+
+section("13. SALES PRODUCT RECONCILIATION COVERAGE")
+
+
+def canonical_erp_from_number(number):
+    if pd.isna(number):
+        return None
+
+    candidates = catalog.loc[
+        catalog["erp_number"] == number,
+        "sku_erp"
+    ]
+
+    if len(candidates) == 1:
+        return candidates.iloc[0]
+
+    return None
+
+
+# ---------------------------------------------------------------------
+# Six-month analysis window
+# ---------------------------------------------------------------------
+
+start_date = pd.Timestamp("2025-10-01")
+end_date = pd.Timestamp("2026-03-31 23:59:59")
+
+
+# ---------------------------------------------------------------------
+# POS
+# ---------------------------------------------------------------------
+
+sales_recon = sales.copy()
+sales_recon["fecha_dt"] = pd.to_datetime(sales_recon["fecha_hora"])
+
+sales_6m = sales_recon[
+    sales_recon["fecha_dt"].between(start_date, end_date)
+].copy()
+
+sales_6m["product_number"] = sales_6m["sku"].apply(
+    extract_pos_number
+)
+
+sales_6m["canonical_sku_erp"] = sales_6m[
+    "product_number"
+].apply(canonical_erp_from_number)
+
+sales_6m["mapped"] = sales_6m["canonical_sku_erp"].notna()
+
+
+print("\nPOS reconciliation coverage")
+print(f"rows: {len(sales_6m)}")
+print(f"mapped rows: {sales_6m['mapped'].sum()}")
+print(f"unmapped rows: {(~sales_6m['mapped']).sum()}")
+
+print(f"total units: {sales_6m['cantidad'].sum()}")
+print(
+    "mapped units:",
+    sales_6m.loc[sales_6m["mapped"], "cantidad"].sum()
+)
+print(
+    "unmapped units:",
+    sales_6m.loc[~sales_6m["mapped"], "cantidad"].sum()
+)
+
+
+# ---------------------------------------------------------------------
+# Shopify
+# ---------------------------------------------------------------------
+
+ecommerce_recon = ecommerce.copy()
+ecommerce_recon["fecha_dt"] = pd.to_datetime(
+    ecommerce_recon["fecha"]
+)
+
+ecommerce_6m = ecommerce_recon[
+    ecommerce_recon["fecha_dt"].between(start_date, end_date)
+].copy()
+
+ecommerce_6m["product_number"] = ecommerce_6m[
+    "product_handle"
+].apply(extract_handle_number)
+
+ecommerce_6m["canonical_sku_erp"] = ecommerce_6m[
+    "product_number"
+].apply(canonical_erp_from_number)
+
+ecommerce_6m["mapped"] = ecommerce_6m[
+    "canonical_sku_erp"
+].notna()
+
+
+print("\nShopify reconciliation coverage")
+print(f"rows: {len(ecommerce_6m)}")
+print(f"mapped rows: {ecommerce_6m['mapped'].sum()}")
+print(f"unmapped rows: {(~ecommerce_6m['mapped']).sum()}")
+
+print(f"total units: {ecommerce_6m['cantidad'].sum()}")
+print(
+    "mapped units:",
+    ecommerce_6m.loc[
+        ecommerce_6m["mapped"],
+        "cantidad"
+    ].sum()
+)
+print(
+    "unmapped units:",
+    ecommerce_6m.loc[
+        ~ecommerce_6m["mapped"],
+        "cantidad"
+    ].sum()
+)
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

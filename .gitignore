@@ -1,9 +1,19 @@
 # Local environment
 .env
+.venv/
 
 # Raw challenge data
 data/raw/*
 !data/raw/.gitkeep
+
+# Generated analytical data
+data/processed/*
+!data/processed/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
 # OS files
 .DS_Store

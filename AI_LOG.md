@@ -102,6 +102,53 @@ I created and executed a local Python validation script against the original sou
 
 No discrepancy was found in the critical facts used for subsequent design decisions.
 
+### Prompt 3 — Independent cold review
+
+**Prompt**
+
+I asked a Claude Code Code Reviewer agent to perform a cold audit of the repository using only the challenge materials, source data, and repository contents.
+
+The reviewer was asked to identify reasoning gaps, hidden assumptions, reproducibility problems, incorrect data-model decisions, and implementation risks without modifying the project.
+
+**AI response summary**
+
+The review identified a discrepancy in the product reconciliation logic.
+
+The documented strategy was:
+
+1. Use explicit mappings from `sku_mappings` first.
+2. Use the validated numeric pattern only as a fallback.
+
+However, the implementation was deriving product relationships from the numeric pattern first and using `sku_mappings` only to label whether the resulting relationship was explicit or inferred.
+
+The reviewer also identified reproducibility issues such as uncommitted pipeline files and missing dependency documentation.
+
+**Decision**
+
+Accepted and corrected the reconciliation finding.
+
+`src/reconcile.py` was changed so that explicit mappings are now actually used first. Numeric-pattern inference is only used when an explicit ERP relationship is unavailable.
+
+The pipeline was executed again after the correction.
+
+**Validation**
+
+The corrected implementation produced the same results on the supplied dataset:
+
+- 70 canonical products
+- 60 explicit POS mappings
+- 10 inferred POS mappings
+- 23 explicit Shopify mappings
+- 10 inferred Shopify mappings
+- 0 unreconciled POS sales rows
+- 0 unreconciled Shopify rows
+
+This confirmed that the previous implementation happened to produce the correct result for the supplied data, but did not correctly implement the intended reconciliation hierarchy.
+
+**Why this mattered**
+
+The independent review detected a reasoning and implementation gap that was not visible from the final row counts alone. The correction made the code consistent with the documented reconciliation decision rather than relying on an accidental property of the current dataset.
+
 ---
 
 ## Validation and Decision Notes
@@ -142,7 +189,30 @@ The rule was accepted only after running the validation locally against the orig
 
 ## AI Errors / Suboptimal Suggestions
 
-None documented yet.
+### AI error — Shopify reconciliation merge
+
+ChatGPT initially suggested merging Shopify orders against the complete product bridge using `validate="many_to_one"`.
+
+The implementation failed because the canonical bridge contains all 70 ERP products, while only 33 are observed in Shopify. Products without a Shopify identifier therefore produced multiple `NaN` values in the merge key, which pandas correctly rejected as non-unique.
+
+**Detection**
+
+The error was detected by executing the reconciliation code locally. Pandas raised a `MergeError` indicating that the right-side merge key was not unique.
+
+**Correction**
+
+The Shopify reconciliation step was changed to filter the product bridge to rows with a non-null `product_handle` before performing the `many_to_one` merge.
+
+The validation constraint was kept rather than removed, because it provides protection against genuinely ambiguous Shopify mappings.
+
+**Result**
+
+After the correction:
+
+- 70 canonical ERP products were preserved in the bridge.
+- 33 Shopify product handles were reconciled.
+- 0 Shopify order rows remained unreconciled.
+- 0 POS sales rows remained unreconciled.
 
 ---
 
