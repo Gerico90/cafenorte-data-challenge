@@ -159,3 +159,108 @@ def get_q1_inventory_turnover(
 
     finally:
         connection.close()
+
+def get_q2_stockouts(
+    database_path: Path = DATABASE_PATH,
+) -> pd.DataFrame:
+    """
+    Return store-product stockout events lasting more than
+    3 consecutive days during the latest calendar quarter
+    available in inventory data.
+
+    NULL inventory values break a zero-stock streak.
+    """
+
+    connection = duckdb.connect(
+        str(database_path),
+        read_only=True,
+    )
+
+    try:
+        query = """
+        WITH quarter_window AS (
+            SELECT
+                CAST(
+                    DATE_TRUNC('quarter', MAX(date))
+                    AS DATE
+                ) AS start_date,
+
+                CAST(MAX(date) AS DATE) AS end_date
+
+            FROM fact_inventory
+        ),
+
+        zero_days AS (
+            SELECT
+                i.store_id,
+                i.product_id,
+
+                CAST(i.date AS DATE) AS date,
+
+                CAST(i.date AS DATE)
+                - CAST(
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            i.store_id,
+                            i.product_id
+                        ORDER BY i.date
+                    )
+                    AS INTEGER
+                ) AS streak_group
+
+            FROM fact_inventory AS i
+            CROSS JOIN quarter_window AS w
+
+            WHERE CAST(i.date AS DATE)
+                BETWEEN w.start_date AND w.end_date
+
+              AND i.stock_quantity = 0
+        ),
+
+        stockout_events AS (
+            SELECT
+                store_id,
+                product_id,
+                MIN(date) AS stockout_start,
+                MAX(date) AS stockout_end,
+                COUNT(*) AS stockout_days
+
+            FROM zero_days
+
+            GROUP BY
+                store_id,
+                product_id,
+                streak_group
+
+            HAVING COUNT(*) > 3
+        )
+
+        SELECT
+            e.store_id,
+            s.city,
+            s.region,
+            e.product_id,
+            p.product_name,
+            e.stockout_start,
+            e.stockout_end,
+            e.stockout_days
+
+        FROM stockout_events AS e
+
+        LEFT JOIN dim_store AS s
+            ON e.store_id = s.store_id
+
+        LEFT JOIN dim_product AS p
+            ON e.product_id = p.product_id
+
+        ORDER BY
+            e.stockout_days DESC,
+            e.store_id,
+            e.product_id,
+            e.stockout_start
+        """
+
+        return connection.execute(query).fetchdf()
+
+    finally:
+        connection.close()

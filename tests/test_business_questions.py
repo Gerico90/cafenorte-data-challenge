@@ -1,8 +1,11 @@
 import duckdb
+import pandas as pd
 import pytest
 
-from src.business_questions import get_q1_inventory_turnover
-
+from src.business_questions import (
+    get_q1_inventory_turnover,
+    get_q2_stockouts,
+)
 
 def test_q1_inventory_turnover_calculation(tmp_path):
     database_path = tmp_path / "test.duckdb"
@@ -116,3 +119,91 @@ def test_q1_inventory_turnover_calculation(tmp_path):
 
     # Product A should rank above Product B.
     assert result.iloc[0]["product_id"] == "ERP-A"
+
+def test_q2_stockout_requires_more_than_three_consecutive_zero_days(
+    tmp_path,
+):
+    database_path = tmp_path / "test_q2.duckdb"
+
+    connection = duckdb.connect(str(database_path))
+
+    connection.execute("""
+        CREATE TABLE dim_product (
+            product_id VARCHAR,
+            product_name VARCHAR,
+            category VARCHAR
+        )
+    """)
+
+    connection.execute("""
+        INSERT INTO dim_product VALUES
+        ('ERP-A', 'Product A', 'test')
+    """)
+
+    connection.execute("""
+        CREATE TABLE dim_store (
+            store_id VARCHAR,
+            city VARCHAR,
+            region VARCHAR,
+            timezone VARCHAR
+        )
+    """)
+
+    connection.execute("""
+        INSERT INTO dim_store VALUES
+        ('T001', 'Test City', 'test', 'America/Mexico_City')
+    """)
+
+    connection.execute("""
+        CREATE TABLE fact_inventory (
+            date DATE,
+            store_id VARCHAR,
+            product_id VARCHAR,
+            stock_quantity INTEGER
+        )
+    """)
+
+    connection.execute("""
+        INSERT INTO fact_inventory VALUES
+
+        -- Valid 4-day stockout
+        ('2026-01-01', 'T001', 'ERP-A', 0),
+        ('2026-01-02', 'T001', 'ERP-A', 0),
+        ('2026-01-03', 'T001', 'ERP-A', 0),
+        ('2026-01-04', 'T001', 'ERP-A', 0),
+
+        -- Break the streak
+        ('2026-01-05', 'T001', 'ERP-A', 5),
+
+        -- NULL must break this sequence
+        ('2026-02-01', 'T001', 'ERP-A', 0),
+        ('2026-02-02', 'T001', 'ERP-A', 0),
+        ('2026-02-03', 'T001', 'ERP-A', NULL),
+        ('2026-02-04', 'T001', 'ERP-A', 0),
+        ('2026-02-05', 'T001', 'ERP-A', 0),
+
+        -- Establish end of latest quarter
+        ('2026-03-31', 'T001', 'ERP-A', 5)
+    """)
+
+    connection.close()
+
+    result = get_q2_stockouts(
+        database_path=database_path,
+    )
+
+    assert len(result) == 1
+
+    event = result.iloc[0]
+
+    assert event["store_id"] == "T001"
+    assert event["product_id"] == "ERP-A"
+    assert event["stockout_days"] == 4
+
+    assert event["stockout_start"] == pd.Timestamp(
+        "2026-01-01"
+    )
+
+    assert event["stockout_end"] == pd.Timestamp(
+        "2026-01-04"
+    )
