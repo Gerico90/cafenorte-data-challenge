@@ -230,6 +230,267 @@ print(
     sales_stores == inventory_stores,
 )
 
+# ---------------------------------------------------------------------
+# 9. PRODUCT ID PATTERN VALIDATION
+# ---------------------------------------------------------------------
+
+import re
+
+section("9. PRODUCT ID PATTERN VALIDATION")
+
+
+def extract_pos_number(value):
+    if pd.isna(value):
+        return None
+
+    match = re.fullmatch(r"CN-(\d{5})", str(value))
+    return int(match.group(1)) if match else None
+
+
+def extract_erp_number(value):
+    if pd.isna(value):
+        return None
+
+    match = re.fullmatch(r"ERP-PROV-MX-(\d{3})-[A-Z]", str(value))
+    return int(match.group(1)) if match else None
+
+
+def extract_handle_number(value):
+    if pd.isna(value):
+        return None
+
+    match = re.search(r"-(\d{3})$", str(value))
+    return int(match.group(1)) if match else None
+
+
+# Add extracted numeric components
+mapping_check = mappings.copy()
+
+mapping_check["pos_number"] = mapping_check["sku_pos"].apply(extract_pos_number)
+mapping_check["erp_number"] = mapping_check["sku_erp"].apply(extract_erp_number)
+mapping_check["handle_number"] = mapping_check["handle"].apply(extract_handle_number)
+
+
+# ---------------------------------------------------------------------
+# POS <-> ERP known mappings
+# ---------------------------------------------------------------------
+
+pos_erp_known = mapping_check.dropna(subset=["sku_pos", "sku_erp"]).copy()
+
+pos_erp_known["number_match"] = (
+    pos_erp_known["pos_number"] == pos_erp_known["erp_number"]
+)
+
+print("\nPOS -> ERP known mappings")
+print(f"known mappings: {len(pos_erp_known)}")
+print(f"numeric matches: {int(pos_erp_known['number_match'].sum())}")
+print(f"numeric mismatches: {int((~pos_erp_known['number_match']).sum())}")
+
+if not pos_erp_known["number_match"].all():
+    print("\nMismatches:")
+    print(
+        pos_erp_known.loc[
+            ~pos_erp_known["number_match"],
+            ["sku_pos", "sku_erp", "pos_number", "erp_number"]
+        ].to_string(index=False)
+    )
+
+
+# ---------------------------------------------------------------------
+# POS <-> HANDLE known mappings
+# ---------------------------------------------------------------------
+
+pos_handle_known = mapping_check.dropna(subset=["sku_pos", "handle"]).copy()
+
+pos_handle_known["number_match"] = (
+    pos_handle_known["pos_number"] == pos_handle_known["handle_number"]
+)
+
+print("\nPOS -> HANDLE known mappings")
+print(f"known mappings: {len(pos_handle_known)}")
+print(f"numeric matches: {int(pos_handle_known['number_match'].sum())}")
+print(f"numeric mismatches: {int((~pos_handle_known['number_match']).sum())}")
+
+if not pos_handle_known["number_match"].all():
+    print("\nMismatches:")
+    print(
+        pos_handle_known.loc[
+            ~pos_handle_known["number_match"],
+            ["sku_pos", "handle", "pos_number", "handle_number"]
+        ].to_string(index=False)
+    )
+
+
+# ---------------------------------------------------------------------
+# ERP catalog numeric-key uniqueness
+# ---------------------------------------------------------------------
+
+catalog = pd.DataFrame(inventory["catalogo"]["productos"]).copy()
+
+catalog["erp_number"] = catalog["sku_erp"].apply(extract_erp_number)
+
+print("\nERP catalog numeric-key uniqueness")
+print(f"catalog products: {len(catalog)}")
+print(f"parsed ERP numbers: {catalog['erp_number'].notna().sum()}")
+print(f"unique ERP numbers: {catalog['erp_number'].nunique()}")
+
+duplicate_erp_numbers = catalog[
+    catalog["erp_number"].duplicated(keep=False)
+].sort_values("erp_number")
+
+print(f"duplicate numeric ERP identifiers: {len(duplicate_erp_numbers)}")
+
+if not duplicate_erp_numbers.empty:
+    print(duplicate_erp_numbers[["sku_erp", "erp_number", "nombre"]].to_string(index=False))
+
+
+# ---------------------------------------------------------------------
+# Candidate inference for currently unmapped POS SKUs
+# ---------------------------------------------------------------------
+
+print("\nCandidate ERP mappings for unmapped POS SKUs")
+
+unmapped_pos = sorted(sales_skus - mapped_pos)
+
+for sku in unmapped_pos:
+    number = extract_pos_number(sku)
+
+    candidates = catalog[catalog["erp_number"] == number]
+
+    print(f"\n{sku} -> numeric component {number:03d}")
+    print(f"candidate count: {len(candidates)}")
+
+    if len(candidates) > 0:
+        print(
+            candidates[
+                ["sku_erp", "nombre", "categoria"]
+            ].to_string(index=False)
+        )
+
+
+# ---------------------------------------------------------------------
+# Candidate inference for currently unmapped ecommerce handles
+# ---------------------------------------------------------------------
+
+print("\nCandidate ERP mappings for unmapped ecommerce handles")
+
+for handle in missing_handles:
+    number = extract_handle_number(handle)
+
+    candidates = catalog[catalog["erp_number"] == number]
+
+    print(f"\n{handle} -> numeric component {number:03d}")
+    print(f"candidate count: {len(candidates)}")
+
+    if len(candidates) > 0:
+        print(
+            candidates[
+                ["sku_erp", "nombre", "categoria"]
+            ].to_string(index=False)
+        )
+
+
+# ---------------------------------------------------------------------
+# Full three-way consistency where all three identifiers are present
+# ---------------------------------------------------------------------
+
+three_way = mapping_check.dropna(
+    subset=["sku_pos", "sku_erp", "handle"]
+).copy()
+
+three_way["all_match"] = (
+    (three_way["pos_number"] == three_way["erp_number"])
+    & (three_way["erp_number"] == three_way["handle_number"])
+)
+
+print("\nThree-way known mappings")
+print(f"rows with POS + ERP + handle: {len(three_way)}")
+print(f"all numeric components match: {int(three_way['all_match'].sum())}")
+print(f"mismatches: {int((~three_way['all_match']).sum())}")
+
+# ---------------------------------------------------------------------
+# 10. PRODUCT ID COLLISION / CONFLICT CHECK
+# ---------------------------------------------------------------------
+
+section("10. PRODUCT ID COLLISION / CONFLICT CHECK")
+
+
+# All POS identifiers actually observed
+all_pos = pd.DataFrame({
+    "sku_pos": sorted(sales["sku"].dropna().unique())
+})
+all_pos["number"] = all_pos["sku_pos"].apply(extract_pos_number)
+
+
+# All ERP identifiers in the catalog
+all_erp = catalog[["sku_erp"]].copy()
+all_erp["number"] = all_erp["sku_erp"].apply(extract_erp_number)
+
+
+# All Shopify identifiers actually observed
+all_handles = pd.DataFrame({
+    "handle": sorted(ecommerce["product_handle"].dropna().unique())
+})
+all_handles["number"] = all_handles["handle"].apply(extract_handle_number)
+
+
+print("\nUnparseable identifiers")
+print("POS:", int(all_pos["number"].isna().sum()))
+print("ERP:", int(all_erp["number"].isna().sum()))
+print("Shopify:", int(all_handles["number"].isna().sum()))
+
+
+def report_collisions(df, number_col, id_col, label):
+    collisions = (
+        df.groupby(number_col)[id_col]
+        .nunique()
+        .loc[lambda x: x > 1]
+    )
+
+    print(f"\n{label} numeric collisions: {len(collisions)}")
+
+    if not collisions.empty:
+        for number in collisions.index:
+            values = df.loc[
+                df[number_col] == number,
+                id_col
+            ].unique()
+
+            print(number, "->", list(values))
+
+
+report_collisions(all_pos, "number", "sku_pos", "POS")
+report_collisions(all_erp, "number", "sku_erp", "ERP")
+report_collisions(all_handles, "number", "handle", "Shopify")
+
+
+# Check explicit mapping rows against the numeric rule
+explicit_conflicts = []
+
+for _, row in mappings.iterrows():
+
+    pos_num = extract_pos_number(row["sku_pos"])
+    erp_num = extract_erp_number(row["sku_erp"])
+    handle_num = extract_handle_number(row["handle"])
+
+    known_numbers = [
+        x for x in [pos_num, erp_num, handle_num]
+        if x is not None
+    ]
+
+    if len(set(known_numbers)) > 1:
+        explicit_conflicts.append({
+            "sku_pos": row["sku_pos"],
+            "sku_erp": row["sku_erp"],
+            "handle": row["handle"],
+            "numbers": known_numbers,
+        })
+
+
+print("\nExplicit mapping conflicts:", len(explicit_conflicts))
+
+if explicit_conflicts:
+    print(pd.DataFrame(explicit_conflicts).to_string(index=False))
 
 # ---------------------------------------------------------------------
 # Summary
