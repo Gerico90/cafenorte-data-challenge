@@ -70,8 +70,8 @@ def build_product_bridge(
 
     Resolution order:
     1. Use explicit source mappings from inventory.json.
-    2. Only when an explicit ERP relationship is missing, use the
-       validated numeric product component as a fallback.
+    2. Only when an explicit ERP relationship is missing,
+       use the validated numeric product component as fallback.
     """
 
     catalog = pd.DataFrame(
@@ -112,11 +112,12 @@ def build_product_bridge(
             "ERP catalog contains duplicate sku_erp values."
         )
 
-    catalog["product_number"] = catalog[
-        "sku_erp"
-    ].apply(extract_erp_number)
+    catalog["product_number"] = (
+        catalog["sku_erp"]
+        .apply(extract_erp_number)
+    )
 
-    # Numeric uniqueness matters only for fallback inference.
+    # Numeric identifiers are used only for fallback inference.
     numeric_catalog = catalog[
         catalog["product_number"].notna()
     ].copy()
@@ -126,6 +127,13 @@ def build_product_bridge(
             "ERP numeric product identifiers are not unique. "
             "Numeric fallback is unsafe."
         )
+
+    erp_by_number = dict(
+        zip(
+            numeric_catalog["product_number"],
+            numeric_catalog["sku_erp"],
+        )
+    )
 
     catalog_skus = set(catalog["sku_erp"])
 
@@ -155,19 +163,21 @@ def build_product_bridge(
     if unknown_pos_targets:
         raise ValueError(
             "Explicit POS mappings reference ERP products "
-            f"not present in the catalog: "
+            "not present in the catalog: "
             f"{sorted(unknown_pos_targets)}"
         )
 
-    # Validate that the numeric fallback assumption has not been
-    # contradicted by an explicit source relationship.
-    explicit_pos["pos_number"] = explicit_pos[
-        "sku_pos"
-    ].apply(extract_pos_number)
+    # If both identifiers follow the known numeric convention,
+    # they must not contradict each other.
+    explicit_pos["pos_number"] = (
+        explicit_pos["sku_pos"]
+        .apply(extract_pos_number)
+    )
 
-    explicit_pos["erp_number"] = explicit_pos[
-        "sku_erp"
-    ].apply(extract_erp_number)
+    explicit_pos["erp_number"] = (
+        explicit_pos["sku_erp"]
+        .apply(extract_erp_number)
+    )
 
     pos_pattern_conflicts = explicit_pos[
         explicit_pos["pos_number"].notna()
@@ -214,7 +224,7 @@ def build_product_bridge(
     if unknown_shopify_targets:
         raise ValueError(
             "Explicit Shopify mappings reference ERP products "
-            f"not present in the catalog: "
+            "not present in the catalog: "
             f"{sorted(unknown_shopify_targets)}"
         )
 
@@ -252,12 +262,17 @@ def build_product_bridge(
     # ------------------------------------------------------------------
 
     pos_products = pd.DataFrame({
-        "sku_pos": sorted(
-            sales["sku"].dropna().unique()
-        )
+    "sku_pos": pd.Series(
+        sorted(
+            sales["sku"]
+            .dropna()
+            .unique()
+        ),
+        dtype="object",
+    )
     })
 
-    # EXPLICIT FIRST
+    # Explicit mapping is applied first.
     pos_products = pos_products.merge(
         explicit_pos,
         on="sku_pos",
@@ -274,41 +289,29 @@ def build_product_bridge(
         })
     )
 
-    # Numeric component is only required for rows lacking
-    # an explicit ERP mapping.
     pos_products["product_number"] = (
         pos_products["sku_pos"]
         .apply(extract_pos_number)
     )
 
-    pos_fallback_lookup = (
-        numeric_catalog[
-            ["product_number", "sku_erp"]
-        ]
-        .rename(
-            columns={
-                "sku_erp": "fallback_sku_erp"
-            }
-        )
-    )
-
-    pos_products = pos_products.merge(
-        pos_fallback_lookup,
-        on="product_number",
-        how="left",
-        validate="many_to_one",
-    )
-
+    # Only rows without an explicit mapping use numeric fallback.
     pos_needs_fallback = (
         pos_products["sku_erp"].isna()
     )
 
-    invalid_pos_fallback = pos_products[
-        pos_needs_fallback
-        & (
-            pos_products["product_number"].isna()
-            | pos_products["fallback_sku_erp"].isna()
-        )
+    pos_fallback = pos_products.loc[
+        pos_needs_fallback,
+        ["sku_pos", "product_number"],
+    ].copy()
+
+    pos_fallback["fallback_sku_erp"] = (
+        pos_fallback["product_number"]
+        .map(erp_by_number)
+    )
+
+    invalid_pos_fallback = pos_fallback[
+        pos_fallback["product_number"].isna()
+        | pos_fallback["fallback_sku_erp"].isna()
     ]
 
     if not invalid_pos_fallback.empty:
@@ -319,19 +322,12 @@ def build_product_bridge(
         )
 
     pos_products.loc[
-        pos_needs_fallback,
+        pos_fallback.index,
         "sku_erp",
-    ] = pos_products.loc[
-        pos_needs_fallback,
-        "fallback_sku_erp",
-    ]
+    ] = pos_fallback["fallback_sku_erp"]
 
-    pos_products = pos_products.drop(
-        columns=["fallback_sku_erp"]
-    )
-
-    # Current analytical model expects at most one POS identifier
-    # per canonical ERP product.
+    # Current analytical model expects at most one observed
+    # POS identifier per canonical ERP product.
     if pos_products["sku_erp"].duplicated().any():
         duplicates = sorted(
             pos_products.loc[
@@ -352,16 +348,22 @@ def build_product_bridge(
     # ------------------------------------------------------------------
 
     shopify_products = pd.DataFrame({
-        "product_handle": sorted(
+    "product_handle": pd.Series(
+        sorted(
             ecommerce["product_handle"]
             .dropna()
             .unique()
-        )
+        ),
+        dtype="object",
+    )
     })
 
+    # Explicit mapping is applied first.
     shopify_products = shopify_products.merge(
         explicit_shopify.rename(
-            columns={"handle": "product_handle"}
+            columns={
+                "handle": "product_handle"
+            }
         ),
         on="product_handle",
         how="left",
@@ -382,36 +384,24 @@ def build_product_bridge(
         .apply(extract_handle_number)
     )
 
-    shopify_fallback_lookup = (
-        numeric_catalog[
-            ["product_number", "sku_erp"]
-        ]
-        .rename(
-            columns={
-                "sku_erp": "fallback_sku_erp"
-            }
-        )
-    )
-
-    shopify_products = shopify_products.merge(
-        shopify_fallback_lookup,
-        on="product_number",
-        how="left",
-        validate="many_to_one",
-    )
-
+    # Only rows without an explicit mapping use numeric fallback.
     shopify_needs_fallback = (
         shopify_products["sku_erp"].isna()
     )
 
-    invalid_shopify_fallback = shopify_products[
-        shopify_needs_fallback
-        & (
-            shopify_products["product_number"].isna()
-            | shopify_products[
-                "fallback_sku_erp"
-            ].isna()
-        )
+    shopify_fallback = shopify_products.loc[
+        shopify_needs_fallback,
+        ["product_handle", "product_number"],
+    ].copy()
+
+    shopify_fallback["fallback_sku_erp"] = (
+        shopify_fallback["product_number"]
+        .map(erp_by_number)
+    )
+
+    invalid_shopify_fallback = shopify_fallback[
+        shopify_fallback["product_number"].isna()
+        | shopify_fallback["fallback_sku_erp"].isna()
     ]
 
     if not invalid_shopify_fallback.empty:
@@ -422,23 +412,16 @@ def build_product_bridge(
         )
 
     shopify_products.loc[
-        shopify_needs_fallback,
+        shopify_fallback.index,
         "sku_erp",
-    ] = shopify_products.loc[
-        shopify_needs_fallback,
-        "fallback_sku_erp",
-    ]
-
-    shopify_products = shopify_products.drop(
-        columns=["fallback_sku_erp"]
-    )
+    ] = shopify_fallback["fallback_sku_erp"]
 
     if shopify_products["sku_erp"].duplicated().any():
         duplicates = sorted(
             shopify_products.loc[
-                shopify_products[
-                    "sku_erp"
-                ].duplicated(keep=False),
+                shopify_products["sku_erp"].duplicated(
+                    keep=False
+                ),
                 "sku_erp",
             ].unique()
         )
