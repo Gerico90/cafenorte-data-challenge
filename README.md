@@ -1,6 +1,6 @@
-# CaféNorte — Reto Técnico de Data Solutions Engineer
+# CaféNorte - Reto Técnico de Data Solutions Engineer
 
-Pipeline de datos que consolida las ventas físicas (POS) y de e-commerce (Shopify) de CaféNorte, los datos de inventario/catálogo/costo del ERP y los tipos de cambio oficiales en un único modelo analítico, y responde cuatro preguntas de negocio sobre él.
+Pipeline de datos que consolida las ventas físicas (POS) y de e-commerce (Shopify) de CaféNorte, el inventario físico, catálogo y costos del ERP, y los tipos de cambio oficiales en un único modelo analítico. A partir de ese modelo se responden cuatro preguntas de negocio.
 
 ## 1. Resumen del proyecto
 
@@ -9,13 +9,13 @@ El pipeline integra cuatro fuentes:
 | Fuente | Archivo | Descripción |
 |---|---|---|
 | Ventas físicas POS | `sales.csv` | Transacciones de punto de venta en 40 tiendas |
-| Inventario / catálogo / costo del ERP | `inventory.json` | ERP legado: catálogo de productos, `sku_mappings`, snapshots diarios de inventario, historial de costos de producto |
+| Inventario / catálogo / costo del ERP | `inventory.json` | ERP legado: catálogo de productos, `sku_mappings`, registros diarios de inventario e historial de costos |
 | Órdenes de e-commerce | `ecommerce_orders.parquet` | Órdenes de Shopify |
-| Tipos de cambio | `exchange_rates.csv` | Tipos de cambio diarios, usados para normalizar a MXN los ingresos de e-commerce en otras monedas |
+| Tipos de cambio | `exchange_rates.csv` | Tipos de cambio diarios usados para normalizar a MXN los ingresos de e-commerce en otras monedas |
 
-`exchange_rates.csv` no es una de las tres fuentes mencionadas en la narrativa original del reto, pero fue confirmado por el responsable del reto como material oficial del mismo. Esta solución lo usa para normalizar a MXN los ingresos de e-commerce en monedas distintas de MXN en Q3. Se trata aquí como una fuente de primer nivel, no como un archivo incidental o no oficial.
+`exchange_rates.csv` no aparece entre las tres fuentes descritas en la narrativa original del reto, pero el responsable del reto confirmó que forma parte del material oficial. Esta solución lo utiliza en Q3 para convertir a MXN las ventas de e-commerce registradas en USD o EUR.
 
-**Stack tecnológico**
+**Tecnologías**
 
 - Python 3.11
 - pandas 3.0.2
@@ -23,26 +23,26 @@ El pipeline integra cuatro fuentes:
 - pyarrow 25.0.1
 - pytest 9.1.1
 
-Este es un stack local, de una sola máquina: los conjuntos de datos suministrados son de tamaño pequeño/mediano (la tabla más grande tiene ~230K filas), el resultado objetivo es un conjunto de cuatro consultas analíticas y no un servicio de streaming o de baja latencia, y DuckDB ofrece un motor analítico compatible con SQL dentro del mismo proceso sin requerir un entorno de ejecución distribuido. El procesamiento distribuido (Spark, data warehouses en la nube, etc.) añadiría una carga operativa desproporcionada para este volumen de datos y el alcance de este reto.
+El volumen suministrado es pequeño/mediano para un flujo analítico local: la tabla más grande tiene aproximadamente 230 mil filas y el objetivo es responder cuatro consultas de negocio, no operar un servicio en tiempo real. DuckDB permite ejecutar SQL analítico dentro del mismo proceso sin añadir infraestructura distribuida innecesaria para el alcance del reto.
 
 ## Estructura del repositorio
 
 ```text
 cafenorte-data-challenge/
 ├── data/
-│   ├── raw/            # challenge source files (gitignored)
-│   └── processed/      # cafenorte.duckdb (generated, gitignored)
+│   ├── raw/            # archivos fuente del reto (excluidos de Git)
+│   └── processed/      # cafenorte.duckdb (generado, excluido de Git)
 ├── docs/
-│   └── aws_proposal.md          # AWS architecture proposal (not part of Q1-Q4)
+│   └── aws_proposal.md          # propuesta de arquitectura AWS
 ├── scripts/
-│   ├── run_pipeline.py             # CLI entry point
+│   ├── run_pipeline.py             # punto de entrada por línea de comandos
 │   └── validate_data_assumptions.py
 ├── src/
-│   ├── load.py                     # raw source loading only
-│   ├── reconcile.py                # product identifier reconciliation
-│   ├── transform.py                # analytical model construction
-│   ├── business_questions.py       # Q1-Q4 DuckDB queries
-│   └── pipeline.py                 # orchestration + persistence
+│   ├── load.py                     # carga de fuentes
+│   ├── reconcile.py                # conciliación de identificadores de producto
+│   ├── transform.py                # construcción del modelo analítico
+│   ├── business_questions.py       # consultas Q1-Q4 en DuckDB
+│   └── pipeline.py                 # orquestación y persistencia
 ├── tests/
 │   ├── test_reconciliation.py
 │   ├── test_transformations.py
@@ -54,7 +54,14 @@ cafenorte-data-challenge/
 
 ## 2. Cómo ejecutar
 
-Desde la raíz del repositorio, con los cuatro archivos raw colocados en `data/raw/`:
+Coloca estos cuatro archivos en `data/raw/`:
+
+- `sales.csv`
+- `inventory.json`
+- `ecommerce_orders.parquet`
+- `exchange_rates.csv`
+
+Después, desde la raíz del repositorio:
 
 ```bash
 pip install -r requirements.txt
@@ -62,9 +69,9 @@ python scripts/run_pipeline.py
 python -m pytest -q
 ```
 
-`scripts/run_pipeline.py` reconstruye `data/processed/cafenorte.duckdb` de principio a fin a partir de las fuentes raw (load → reconcile → transform → persist). Esto se ha validado con una reconstrucción limpia desde las fuentes raw, y el resultado actual de la suite de pruebas completa es **41 passed**.
+`scripts/run_pipeline.py` reconstruye `data/processed/cafenorte.duckdb` de principio a fin a partir de las fuentes: carga, conciliación, transformación y persistencia.
 
-`data/processed/` también puede contener copias de respaldo `*.bak_*` con marca de tiempo del archivo DuckDB, creadas de forma incidental durante la iteración local. Estos respaldos no forman parte del flujo de trabajo requerido y no son producidos ni consumidos por `run_pipeline.py`, `business_questions.py` ni la suite de pruebas.
+La solución se validó también desde una clonación limpia del repositorio. La suite completa termina con **41 pruebas aprobadas (`41 passed`)**.
 
 ## 3. Flujo del pipeline
 
@@ -80,60 +87,56 @@ persist_analytical_model()  → cafenorte.duckdb   (src/pipeline.py)
 get_q1..q4_*()                              (src/business_questions.py)
 ```
 
-`build_analytical_model` produce seis tablas, persistidas tal cual en DuckDB:
+`build_analytical_model()` produce seis tablas:
 
 | Tabla | Granularidad | Filas |
-|---|---|---|
+|---|---|---:|
 | `dim_product` | producto canónico (`product_id` = `sku_erp`) | 70 |
 | `dim_store` | tienda física | 40 |
-| `fact_sales` | una transacción, física o de e-commerce | 96,437 (86,490 physical + 9,947 e-commerce) |
+| `fact_sales` | una transacción física o de e-commerce | 96,437 (`physical`: 86,490; `ecommerce`: 9,947) |
 | `fact_inventory` | tienda × producto × día | 230,776 |
-| `fact_product_cost` | producto × fecha de vigencia del costo (historial completo, sin colapsar) | 282 |
-| `fact_exchange_rate` | fecha del tipo de cambio × moneda (USD/EUR) | 730 |
+| `fact_product_cost` | producto × fecha de vigencia del costo | 282 |
+| `fact_exchange_rate` | fecha × moneda (USD/EUR) | 730 |
 
-`fact_sales` conserva `amount_native` + `currency` por transacción; la normalización a MXN de las filas de e-commerce en moneda distinta de MXN se aplica al momento de la consulta en Q3 mediante `fact_exchange_rate`, no durante la construcción del modelo.
+`fact_sales` conserva `amount_native` y `currency` por transacción. La conversión a MXN de las ventas de e-commerce en USD/EUR se realiza en Q3 mediante `fact_exchange_rate`.
 
 ## 4. Reconciliación de productos
 
-`product_id` (`sku_erp`) es el identificador canónico de cada producto en el modelo analítico.
+`product_id` (`sku_erp`) es el identificador canónico de producto.
 
-Prioridad de reconciliación, aplicada en `src/reconcile.py`:
+La conciliación en `src/reconcile.py` sigue esta prioridad:
 
-1. **Mapeo explícito** desde `inventory.json → sku_mappings` (SKU de POS o handle de Shopify → `sku_erp`).
-2. **Respaldo numérico**, aplicado únicamente cuando no existe un mapeo explícito para ese identificador *y* el componente numérico extraído de él se resuelve en exactamente un producto del ERP.
-3. No se realiza ninguna coincidencia difusa por nombre (fuzzy name matching) en ninguna parte de la reconciliación.
+1. **Mapeo explícito:** usa `inventory.json → sku_mappings`.
+2. **Respaldo numérico:** solo cuando no existe un mapeo explícito y el componente numérico del identificador corresponde de forma única a un producto del ERP.
+3. No se usa coincidencia difusa por nombre.
 
-El método de mapeo usado para cada producto observado se conserva en `dim_product` como `pos_mapping_method` / `shopify_mapping_method`, con los valores `explicit`, `inferred_numeric_pattern` o `not_observed`.
+El método aplicado queda registrado en `dim_product` mediante `pos_mapping_method` y `shopify_mapping_method`, con los valores `explicit`, `inferred_numeric_pattern` o `not_observed`.
 
 **Cobertura final**
 
-- 70 / 70 SKUs físicos de POS reconciliados a un `sku_erp` canónico.
-- 0 filas de ventas físicas sin reconciliar.
-- Los 33 productos de Shopify observados en el mismo período se reconcilian a un SKU canónico. Esta cobertura de reconciliación es un hecho general del pipeline usado en Q3; no significa por sí misma que el e-commerce participe en el cálculo de rotación de Q1 — véase la sección 5.
+- 70 de 70 SKUs de POS reconciliados con un `sku_erp`.
+- 0 ventas físicas sin reconciliar.
+- Los 33 productos de Shopify observados se reconcilian con un `sku_erp`.
 
-## 5. Pregunta de negocio 1 — Rotación de inventario (Top 10 SKUs)
+La conciliación de Shopify permite identificar qué producto se vendió, pero no qué inventario surtió la orden. Esa diferencia es relevante para Q1.
+
+## 5. Pregunta de negocio 1 - Rotación de inventario
 
 *Top 10 SKUs por rotación de inventario en los últimos 6 meses.*
 
-- **Período:** del 2025-10-01 al 2026-03-31 (inclusive).
-- **Alcance:** solo ventas físicas (POS). Q1 mide la rotación de inventario únicamente para combinaciones tienda-producto físicas donde tanto las ventas como el inventario son observables. Esta exclusión aplica solo a Q1; el e-commerce no se excluye del modelo analítico, permanece completamente reconciliado a nivel de SKU en `fact_sales`, se usa en Q3 y está disponible para cualquier otro análisis de ventas donde sea apropiado.
+- **Período:** del 2025-10-01 al 2026-03-31, ambas fechas incluidas.
+- **Alcance:** tiendas físicas. Solo participan ventas de pares tienda-SKU que también tienen una serie de inventario observable durante el período.
 - **Fórmula:** `inventory_turnover = physical_units_sold_from_inventory_observable_store_product_pairs / average_inventory_units`
-- **Inventario (denominador):** para cada par tienda-SKU con al menos un snapshot de inventario observable en el período, se promedian sus lecturas numéricas (el `0` numérico cuenta como observación; `N/A`/`NULL` se excluye, nunca se interpola ni se reemplaza por `0`). Los promedios tienda-SKU se suman a nivel de SKU.
-- **Ventas físicas (numerador):** se incluyen únicamente para los pares tienda-SKU que tienen una serie de inventario observable en el período. No se imputa inventario a los pares con ventas pero sin serie de inventario; esas ventas siguen siendo válidas en otras partes de `fact_sales`, solo que quedan fuera de este cálculo específico.
-- **E-commerce:** excluido del numerador y del denominador de Q1. Esta es una decisión de consistencia de población entre numerador y denominador, no un problema de calidad de datos: la fuente de e-commerce indica qué producto se vendió y cuántas unidades, pero no identifica la tienda, el almacén, la ubicación de cumplimiento ni el pool de inventario que surtió la orden, y los snapshots de inventario suministrados corresponden a inventario de tiendas físicas. Emparejar la demanda de e-commerce con el denominador de inventario de tiendas físicas no está respaldado por los datos suministrados. Esto **no** significa que falte el inventario de e-commerce; significa que los datos suministrados no identifican el pool de inventario que surtió las órdenes de e-commerce. Véase la divulgación más abajo para el volumen exacto excluido.
-- **`tipo_comprobante`:** los cinco códigos observados (I, E, P, N, T) se cuentan exactamente como fueron registrados, sin filtrado y sin inversión de signo.
+- **Inventario:** para cada par tienda-SKU con registros de inventario en el período, se promedian únicamente las lecturas numéricas. El valor `0` sí participa en el promedio; `N/A`/`NULL` no se reemplaza por cero ni se interpola. Después se suman los promedios de tienda a nivel de SKU.
+- **Ventas físicas:** solo se incluyen las unidades vendidas de pares tienda-SKU con inventario observable. No se estima inventario para los pares que tienen ventas pero no una serie de inventario.
+- **E-commerce:** no participa en Q1. Durante el período se vendieron 6,627 unidades por e-commerce, pero la fuente no identifica qué tienda, almacén u origen de inventario surtió esas órdenes. Sumarlas al numerador implicaría compararlas contra inventario físico de tiendas sin una relación demostrada.
+- **`tipo_comprobante`:** los códigos I, E, P, N y T se cuentan tal como fueron registrados, sin filtrar ni invertir el signo.
 
-`sales.csv` incluye una columna `tipo_comprobante` con cinco códigos de letra: I, E, P, N, T. Solo como contexto externo, estas letras coinciden con el catálogo CFDI oficial del SAT de México (`c_TipoDeComprobante`: I = Ingreso, E = Egreso, T = Traslado, N = Nómina, P = Pago). Ese catálogo se menciona aquí únicamente como referencia: la fuente de CaféNorte nunca afirma que `tipo_comprobante` sea una exportación de CFDI, y carece de los campos fiscales (UUID, complemento de pago y similares) que serían necesarios para confirmar realmente un comportamiento CFDI. Asumir que aplica la semántica del SAT solo porque las letras coinciden no estaría respaldado por los datos.
+Las letras de `tipo_comprobante` coinciden con códigos usados en el catálogo CFDI del SAT, pero los datos de CaféNorte no demuestran que esa sea su semántica. En los datos suministrados, los cinco códigos tienen cantidades y montos positivos y no muestran un patrón que permita identificar devoluciones, cancelaciones o ajustes. Por ello se conservan tal como llegan.
 
-En cambio, el campo se revisó directamente: se compararon entre los cinco códigos la cantidad, el monto, el monto por unidad, los patrones de hora del día/día de la semana/mes y la concentración por tienda/SKU, y se buscaron en los datos pares de filas que pudieran representar una reversión o un ajuste. Ningún código mostró un patrón que lo distinguiera de una venta ordinaria, las cantidades y montos son positivos en los cinco códigos y no se encontraron pares de reversión. Dado que los datos suministrados no ofrecen evidencia para tratar algún código de forma distinta, los cinco se cuentan tal como fueron registrados.
+**Cobertura del cálculo:** de 44,336 unidades físicas vendidas durante el período, 20,318 (45.83%) corresponden a pares tienda-SKU con una serie de inventario observable y participan en Q1. Las 24,018 restantes (54.17%) corresponden a pares sin una serie de inventario observable y quedan fuera de este cálculo. Esta ausencia no se interpreta como desabasto, error de extracción ni falta de inventario, porque los datos suministrados no permiten determinar su causa.
 
-**Divulgación de cobertura (unidades físicas):** de 44,336 unidades físicas vendidas en total en el período de Q1, 20,318 pertenecen a combinaciones tienda-SKU con una serie de inventario observable y están incluidas en este cálculo; las 24,018 restantes (54.17%) pertenecen a combinaciones tienda-SKU que no tienen una serie de inventario observable y, por lo tanto, no pueden participar en este cálculo. Esto no es evidencia de inventario faltante, de una brecha de surtido, de un desabasto ni de un error de extracción; el significado de negocio de esa ausencia se desconoce a partir de los datos suministrados. Esas 24,018 unidades siguen siendo datos de ventas válidos en otras partes de `fact_sales`.
-
-**Divulgación de cobertura (e-commerce):** se vendieron 6,627 unidades de e-commerce durante el mismo período. No se incluyen en este cálculo porque los datos suministrados no identifican el pool de inventario que surtió esas órdenes, no porque las ventas sean inválidas. Esas unidades también siguen siendo datos de ventas válidos, completamente reconciliados a nivel de SKU en `fact_sales`, y se usan en Q3 y en cualquier otro análisis de ventas apropiado.
-
-**Sobre combinaciones sin serie de inventario observable:** las combinaciones tienda-producto sin ninguna serie de inventario se tratan como desconocidas, y no se fabrica ningún valor de stock para ellas. Esta entrega no adopta una regla de imputación porque los datos suministrados no ofrecen una base lo suficientemente defendible para una; por lo tanto, la ausencia descrita arriba se mantiene como desconocida en lugar de estimarse.
-
-Este resultado es un ranking de rotación de inventario de tiendas físicas. No es una cifra de rotación a nivel de toda la compañía ni omnicanal.
+El resultado representa rotación de inventario de tiendas físicas, no una rotación omnicanal ni de toda la compañía.
 
 **Resultado final:**
 
@@ -150,37 +153,37 @@ Este resultado es un ranking de rotación de inventario de tiendas físicas. No 
 | 9 | ERP-PROV-MX-069-C | 317 | 719.08 | 0.440838 |
 | 10 | ERP-PROV-MX-053-A | 291 | 665.03 | 0.437576 |
 
-## 6. Pregunta de negocio 2 — Desabastos de más de 3 días (último trimestre)
+## 6. Pregunta de negocio 2 - Desabastos de más de 3 días
 
-*Tiendas con quiebres de stock de más de 3 días en el último trimestre.*
+*Tiendas con desabastos de más de 3 días en el último trimestre.*
 
-- **Período:** último trimestre calendario completo, del 2026-01-01 al 2026-03-31.
-- **Observación de desabasto:** inventario numérico `== 0`.
-- **Evento calificable:** más de 3 días calendario consecutivos de stock cero confirmado.
-- **Manejo de `N/A`:** desconocido, e interrumpe una racha de stock cero en lugar de extenderla.
-- Los eventos se detectan a nivel tienda-SKU y luego se reportan a nivel tienda.
+- **Período:** del 2026-01-01 al 2026-03-31.
+- **Día con desabasto confirmado:** `stock_quantity = 0`.
+- **Evento reportado:** al menos 4 días calendario consecutivos con inventario confirmado en cero.
+- **`N/A`:** el inventario de ese día es desconocido. Como el evento requiere días consecutivos con inventario confirmado en cero, un `N/A` corta la secuencia.
+- Los resultados se reportan por tienda y SKU.
 
 **Resultado final:**
 
-| Store | SKU | Start | End | Days |
+| store_id | product_id | stockout_start | stockout_end | stockout_days |
 |---|---|---|---|---:|
 | T015 | ERP-PROV-MX-014-D | 2026-02-09 | 2026-02-12 | 4 |
 | T023 | ERP-PROV-MX-046-A | 2026-01-25 | 2026-01-28 | 4 |
 | T038 | ERP-PROV-MX-040-A | 2026-03-18 | 2026-03-21 | 4 |
 
-## 7. Pregunta de negocio 3 — Crecimiento mensual (MoM) de ingresos por canal
+## 7. Pregunta de negocio 3 - Crecimiento mensual de ingresos por canal
 
-*Crecimiento mes a mes (MoM) de ventas por canal (físico vs. e-commerce) en el último año.*
+*Crecimiento mes a mes (MoM) de ventas por canal físico vs. e-commerce en el último año.*
 
-- **"Ventas"** se interpreta como ingresos.
-- **Período de reporte:** 2025-04 a 2026-03 (12 meses).
-- **Moneda:** el `monto` físico ya está en MXN; las filas de e-commerce en MXN no se modifican; las filas de e-commerce en USD/EUR se convierten con `amount_mxn = amount * rate_to_mxn`, donde el tipo de cambio se asocia por fecha de transacción + moneda. 0 filas USD/EUR quedaron sin asociar. `get_q3_channel_mom()` lo hace cumplir: si alguna transacción en moneda distinta de MXN dentro del rango del cálculo carece de un tipo de cambio para su fecha + moneda, o si una fecha + moneda de tipo de cambio está duplicada, lanza un `ValueError` en lugar de descartar silenciosamente ese ingreso.
-- **MoM:** `(current_month − previous_month) / previous_month * 100`.
-- **Primer mes (abril de 2025):** el MoM físico usa el ingreso físico de marzo de 2025 como base (marzo en sí no se muestra). El MoM de e-commerce de abril de 2025 es `N/A` porque el conjunto de datos de e-commerce suministrado no tiene ninguna observación anterior a abril de 2025; esto refleja únicamente el conjunto de datos suministrado, no una afirmación de que las ventas de Shopify hayan comenzado en abril de 2025.
+- **Ventas:** se interpreta como ingresos.
+- **Período:** 2025-04 a 2026-03.
+- **Moneda:** las ventas físicas ya están en MXN. Las ventas de e-commerce en USD/EUR se convierten con `amount_mxn = amount * rate_to_mxn`, usando fecha de transacción + moneda. Se verificó que no existan transacciones USD/EUR sin un tipo de cambio correspondiente.
+- **MoM:** `(current_month - previous_month) / previous_month * 100`.
+- **Abril de 2025:** el MoM físico usa marzo de 2025 como base. El MoM de e-commerce es `N/A` porque la fuente suministrada no contiene observaciones anteriores a abril de 2025; esto no implica que Shopify haya comenzado a operar en esa fecha.
 
 **Resultado final:**
 
-| Month | Channel | Revenue (MXN) | MoM % |
+| month | channel | sales_mxn | mom_pct |
 |---|---|---:|---:|
 | 2025-04 | ecommerce | 383,213.10 | N/A |
 | 2025-04 | physical | 1,673,072.00 | -2.38 |
@@ -207,46 +210,46 @@ Este resultado es un ranking de rotación de inventario de tiendas físicas. No 
 | 2026-03 | ecommerce | 350,763.40 | 8.51 |
 | 2026-03 | physical | 1,718,189.00 | 8.97 |
 
-## 8. Pregunta de negocio 4 — Productos con margen negativo, por tienda
+## 8. Pregunta de negocio 4 - Productos con margen negativo por tienda
 
-*Productos con margen negativo y en qué tiendas ocurren.*
+*Productos con margen negativo y las tiendas donde ocurre.*
 
 - **Período:** historial completo de ventas físicas, del 2024-10-01 al 2026-03-31.
-- **Supuesto metodológico:** `costo_mxn` se trata como el costo por unidad del producto. La fuente no establece explícitamente esta semántica de unidad.
-- **Costo aplicable:** la fila más reciente de `cost_history` para el SKU donde `fecha_vigencia <= sale date`.
-- **Por transacción:** `cost = cantidad * applicable costo_mxn`; `margin = monto - cost`.
-- **Agregación:** tienda + SKU. Las filas calificables tienen `margin_mxn < 0`.
-- **Cobertura:** 70/70 SKUs de POS reconciliados; 86,490/86,490 ventas físicas resueltas a un costo aplicable; sin fechas de vigencia de costo duplicadas; sin filas de costo sin resolver.
-- **Nota de alcance:** el e-commerce no se incluye en este resultado porque el resultado solicitado requiere una dimensión de tienda que la fuente de e-commerce no contiene; no se infiere ninguna tienda ni ubicación de cumplimiento para él.
+- **Supuesto metodológico:** `costo_mxn` se interpreta como costo unitario del producto. La fuente no lo especifica explícitamente.
+- **Costo aplicable:** para cada venta se usa la fila más reciente de `cost_history` cuya `fecha_vigencia` sea menor o igual a la fecha de la venta.
+- **Cálculo:** costo de la transacción = `cantidad * costo_mxn`; margen = `monto - costo`.
+- **Agregación:** tienda + SKU. Una combinación se reporta cuando `margin_mxn < 0`.
+- **Cobertura:** 70/70 SKUs de POS reconciliados y 86,490/86,490 ventas físicas con un costo aplicable.
 
-**Resumen del resultado final:** 120 combinaciones tienda-SKU negativas, en 40 tiendas, que involucran 3 SKUs — cada uno de los 3 con margen negativo en las 40 tiendas. `get_q4_negative_margin()` devuelve el detalle completo de 120 filas (tienda, SKU, ingresos, costo, margen, margen %); la tabla siguiente es la vista concisa a nivel de producto.
+**Resultado:** se identificaron 3 SKUs con margen agregado negativo en cada una de las 40 tiendas, es decir, 120 combinaciones tienda-SKU. Los dos primeros SKUs comparten el mismo `product_name` en el catálogo, pero se mantienen separados porque tienen identificadores `sku_erp` distintos.
 
-| SKU | Product | Stores with negative margin |
-|---|---|---:|
-| ERP-PROV-MX-001-A | Sándwich Comida Caliente | 40 / 40 |
-| ERP-PROV-MX-002-B | Sándwich Comida Caliente | 40 / 40 |
-| ERP-PROV-MX-015-D | Especial Cafe Molido | 40 / 40 |
+| sku_erp | product_name | Tiendas con margen negativo |
+|---|---|---|
+| ERP-PROV-MX-001-A | Sándwich Comida Caliente | Todas las tiendas (`T001` a `T040`) |
+| ERP-PROV-MX-002-B | Sándwich Comida Caliente | Todas las tiendas (`T001` a `T040`) |
+| ERP-PROV-MX-015-D | Especial Cafe Molido | Todas las tiendas (`T001` a `T040`) |
 
-## 9. Supuestos / Limitaciones
+`get_q4_negative_margin()` devuelve el detalle completo de las 120 combinaciones con `store_id`, `sku_erp`, `product_name`, `revenue_mxn`, `cost_mxn`, `margin_mxn` y `margin_pct`.
+
+## 9. Supuestos y limitaciones
 
 | # | Enunciado | Tipo |
 |---|---|---|
-| A1 | Las letras de `tipo_comprobante` (I/E/P/N/T) coinciden con el catálogo CFDI del SAT, pero los datos suministrados no prueban que este campo sea una exportación de CFDI y no muestran ninguna diferencia de comportamiento entre códigos; todos los valores se cuentan tal como fueron registrados en cada pregunta, sin filtrado ni inversión de signo. | Interpretación metodológica |
-| A2 | `costo_mxn` se trata como el costo por unidad del producto (usado en Q4). | Interpretación metodológica |
-| A3 | La rotación de inventario de Q1 está condicionada a la cobertura de inventario físico observable; el 54.17% de las unidades físicas (24,018 de 44,336) proviene de combinaciones tienda-SKU sin una serie de inventario observable y no puede participar en ese cálculo. | Limitación |
-| A4 | Una combinación tienda-SKU ausente de `fact_inventory`, o un valor de snapshot `N/A`, significa "desconocido", no cero. No se aplica interpolación ni sustitución por cero en ninguna parte. | Hecho observado |
-| A5 | La fuente de e-commerce no contiene dimensión de tienda física; no se infiere ninguna tienda ni ubicación de cumplimiento para las transacciones de e-commerce (afecta Q1 y Q4). Por ello, el e-commerce se excluye de Q1 (6,627 unidades en el período): los datos suministrados no respaldan emparejar esas ventas con el denominador de inventario de tiendas físicas. Esta exclusión aplica solo a Q1 — el e-commerce permanece en `fact_sales`, completamente reconciliado a nivel de SKU, y se usa en Q3 y en cualquier otro análisis de ventas apropiado. | Hecho observado / Interpretación metodológica |
-| A6 | El conjunto de datos de e-commerce suministrado no tiene ninguna observación anterior al 2025-04-01; esto es una propiedad del conjunto de datos, no evidencia de cuándo el canal de Shopify comenzó realmente a operar. | Hecho observado / Limitación |
-| A7 | Cuando los datos fuente limitan la cobertura analítica (alcance de Q1, Q4), esa ausencia no se asocia con un significado de negocio sin respaldo (p. ej., no se describe como un desabasto, una brecha de surtido o un error de extracción). | Limitación |
+| A1 | La fuente no define la semántica de `tipo_comprobante`; los códigos I/E/P/N/T se conservan tal como fueron registrados. | Interpretación metodológica |
+| A2 | `costo_mxn` se interpreta como costo unitario del producto para Q4. | Interpretación metodológica |
+| A3 | Q1 solo usa ventas físicas de pares tienda-SKU con una serie de inventario observable; 24,018 de 44,336 unidades físicas (54.17%) quedan fuera del cálculo por no cumplir esa condición. | Limitación |
+| A4 | Un `N/A` de inventario se trata como valor desconocido, no como cero. No se interpola ni se sustituye por cero. | Interpretación metodológica |
+| A5 | Q1 excluye 6,627 unidades de e-commerce porque la fuente no identifica el origen de inventario que surtió esas órdenes. | Limitación metodológica |
+| A6 | La fuente de e-commerce no contiene observaciones anteriores al 2025-04-01; esto no permite inferir cuándo comenzó a operar Shopify. | Limitación |
 
-## 10. Pruebas / Reproducibilidad
+## 10. Pruebas y reproducibilidad
 
 ```bash
 python scripts/run_pipeline.py
 python -m pytest -q
 ```
 
-Se validó una reconstrucción limpia desde las fuentes raw de principio a fin:
+Se validó una reconstrucción limpia desde los archivos fuente:
 
-- Los resultados de Q1, Q2, Q3 y Q4 se reprodujeron exactamente como se documentan arriba.
-- Suite de pruebas completa: **41 passed**.
+- Los resultados de Q1, Q2, Q3 y Q4 se reprodujeron exactamente.
+- La suite completa termina con **41 pruebas aprobadas (`41 passed`)**.
