@@ -132,7 +132,7 @@ La conciliación de Shopify permite identificar qué producto se vendió, pero n
 - **E-commerce:** no participa en Q1. Durante el período se vendieron 6,627 unidades por e-commerce, pero la fuente no identifica qué tienda, almacén u origen de inventario surtió esas órdenes. Sumarlas al numerador implicaría compararlas contra inventario físico de tiendas sin una relación demostrada.
 - **`tipo_comprobante`:** los códigos I, E, P, N y T se cuentan tal como fueron registrados, sin filtrar ni invertir el signo.
 
-Las letras de `tipo_comprobante` coinciden con códigos usados en el catálogo CFDI del SAT, pero los datos de CaféNorte no demuestran que esa sea su semántica. En los datos suministrados, los cinco códigos tienen cantidades y montos positivos y no muestran un patrón que permita identificar devoluciones, cancelaciones o ajustes. Por ello se conservan tal como llegan.
+La fuente no define la semántica de `tipo_comprobante`. En los datos suministrados, los cinco códigos tienen cantidades y montos positivos y no muestran un patrón que permita identificar devoluciones, cancelaciones o ajustes. Por ello se conservan tal como fueron registrados.
 
 **Cobertura del cálculo:** de 44,336 unidades físicas vendidas durante el período, 20,318 (45.83%) corresponden a pares tienda-SKU con una serie de inventario observable y participan en Q1. Las 24,018 restantes (54.17%) corresponden a pares sin una serie de inventario observable y quedan fuera de este cálculo. Esta ausencia no se interpreta como desabasto, error de extracción ni falta de inventario, porque los datos suministrados no permiten determinar su causa.
 
