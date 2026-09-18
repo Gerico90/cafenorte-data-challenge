@@ -13,7 +13,7 @@ The pipeline integrates four sources:
 | E-commerce orders | `ecommerce_orders.parquet` | Shopify orders |
 | Exchange rates | `exchange_rates.csv` | Daily FX rates, used to normalize non-MXN e-commerce revenue to MXN |
 
-`exchange_rates.csv` is not one of the three sources named in the original challenge narrative, but it was confirmed by the challenge owner as official material required for currency normalization in Q3. It is treated here as a first-class source, not as an incidental or unofficial file.
+`exchange_rates.csv` is not one of the three sources named in the original challenge narrative, but it was confirmed by the challenge owner as official challenge material. This solution uses it to normalize non-MXN e-commerce revenue in Q3. It is treated here as a first-class source, not as an incidental or unofficial file.
 
 **Technology stack**
 
@@ -62,7 +62,7 @@ python scripts/run_pipeline.py
 python -m pytest -q
 ```
 
-`scripts/run_pipeline.py` rebuilds `data/processed/cafenorte.duckdb` from the raw sources end to end (load → reconcile → transform → persist). This has been validated with a clean rebuild from raw sources, and the current full test suite result is **36 passed**.
+`scripts/run_pipeline.py` rebuilds `data/processed/cafenorte.duckdb` from the raw sources end to end (load → reconcile → transform → persist). This has been validated with a clean rebuild from raw sources, and the current full test suite result is **41 passed**.
 
 `data/processed/` may also contain timestamped `*.bak_*` backup copies of the DuckDB file created incidentally during local iteration. These backups are not part of the required workflow and are not produced or consumed by `run_pipeline.py`, `business_questions.py`, or the test suite.
 
@@ -109,35 +109,46 @@ The mapping method used for each observed product is retained in `dim_product` a
 
 - 70 / 70 physical POS SKUs reconciled to a canonical `sku_erp`.
 - 0 physical sales rows unreconciled.
-- All 33 Shopify products observed in the Q1 window reconcile to a canonical SKU.
+- All 33 Shopify products observed in the same period reconcile to a canonical SKU. This reconciliation coverage is a general pipeline fact used in Q3; it does not by itself mean e-commerce participates in the Q1 turnover calculation — see section 5.
 
 ## 5. Business Question 1 — Inventory Turnover (Top 10 SKUs)
 
 *Top 10 SKUs por rotación de inventario en los últimos 6 meses.*
 
 - **Period:** 2025-10-01 through 2026-03-31 (inclusive).
-- **Formula:** `inventory_turnover = total_units_sold / average_inventory_units`
+- **Scope:** physical (POS) sales only. Q1 measures inventory turnover only for physical store-product combinations where both sales and inventory are observable. This exclusion applies only to Q1; e-commerce is not excluded from the analytical model, remains fully reconciled at SKU level in `fact_sales`, is used in Q3, and is available for any other sales analysis where it is appropriate.
+- **Formula:** `inventory_turnover = physical_units_sold_from_inventory_observable_store_product_pairs / average_inventory_units`
 - **Inventory (denominator):** for each store-SKU pair with at least one observable inventory snapshot in the period, average its numeric readings (numeric `0` counts as an observation; `N/A`/`NULL` is excluded, never interpolated or replaced with `0`). Store-SKU averages are summed to the SKU level.
 - **Physical sales (numerator):** included only for store-SKU pairs that have an observable inventory series in the period. No inventory is imputed for pairs with sales but no inventory series — those sales remain valid elsewhere in `fact_sales`, just outside this specific calculation.
-- **E-commerce:** participates at the SKU level only. It is never assigned to a physical store and no fulfillment store is inferred.
-- **`tipo_comprobante`:** values I/E/P/N/T are all counted as recorded; their semantics are not defined by the supplied data, so no filtering or sign reversal was introduced without evidence.
+- **E-commerce:** excluded from the Q1 numerator and denominator. This is a numerator/denominator population-consistency decision, not a data-quality problem: the e-commerce source tells us which product was sold and how many units, but it does not identify the store, warehouse, fulfillment location, or inventory pool that supplied the order, and the supplied inventory snapshots are physical-store inventory. Pairing e-commerce demand with the physical-store inventory denominator is not supported by the supplied data. This does **not** mean e-commerce inventory is missing — it means the supplied data does not identify the inventory pool that fulfilled e-commerce orders. See the disclosure below for the exact volume excluded.
+- **`tipo_comprobante`:** all five observed codes (I, E, P, N, T) are counted exactly as recorded, with no filtering and no sign reversal.
 
-**Limitation:** 24,018 of 44,336 physical units (54.17%) belong to store-SKU combinations that have no inventory series and therefore cannot participate in this calculation. This is not evidence of missing inventory, an assortment gap, a stockout, or an extraction error — the business meaning of that absence is unknown from the supplied data. Those units remain valid sales data elsewhere.
+`sales.csv` carries a `tipo_comprobante` column with five letter codes: I, E, P, N, T. As external context only, these letters happen to match Mexico's official SAT CFDI catalogue (`c_TipoDeComprobante`: I = Ingreso, E = Egreso, T = Traslado, N = Nómina, P = Pago). That catalogue is mentioned here purely for reference — the CaféNorte source itself never states that `tipo_comprobante` is a CFDI export, and it is missing the fiscal fields (UUID, complemento de pago, and similar) that would be needed to actually confirm CFDI behavior. Assuming SAT semantics apply, just because the letters match, would not be supported by the data.
+
+Instead, the field was checked directly: quantity, amount, amount-per-unit, time-of-day/day-of-week/monthly patterns, and store/SKU concentration were compared across the five codes, and the data was searched for pairs of rows that could represent a reversal or adjustment. No code showed a pattern distinguishing it from an ordinary sale, quantities and amounts are positive across all five codes, and no reversal pairs were found. Because the supplied data gives no evidence for treating any code differently, all five are counted as recorded.
+
+**Coverage disclosure (physical units):** of 44,336 total physical units sold in the Q1 period, 20,318 belong to store-SKU combinations with an observable inventory series and are included in this calculation; the remaining 24,018 (54.17%) belong to store-SKU combinations that have no observable inventory series and therefore cannot participate in this calculation. This is not evidence of missing inventory, an assortment gap, a stockout, or an extraction error — the business meaning of that absence is unknown from the supplied data. Those 24,018 units remain valid sales data elsewhere in `fact_sales`.
+
+**Coverage disclosure (e-commerce):** 6,627 e-commerce units were sold during the same period. They are not included in this calculation because the supplied data does not identify the inventory pool that fulfilled those orders — not because the sales are invalid. Those units also remain valid sales data, fully reconciled at SKU level in `fact_sales`, and are used in Q3 and any other appropriate sales analysis.
+
+**On the missing inventory series:** store-product combinations with no inventory series at all are treated as unknown, and no stock value is fabricated for them. This submission does not adopt an imputation rule because the supplied data does not provide a sufficiently defensible basis for one; the gap above is therefore left as missing rather than estimated.
+
+This result is a physical-store inventory-turnover ranking. It is not a company-wide or omnichannel turnover figure.
 
 **Final result:**
 
-| # | SKU | Physical | E-commerce | Total | Avg inventory | Turnover |
-|---|---|---:|---:|---:|---:|---:|
-| 1 | ERP-PROV-MX-057-C | 199 | 225 | 424 | 478.735987 | 0.885666 |
-| 2 | ERP-PROV-MX-037-C | 260 | 211 | 471 | 599.049042 | 0.786246 |
-| 3 | ERP-PROV-MX-047-B | 343 | 198 | 541 | 713.322050 | 0.758423 |
-| 4 | ERP-PROV-MX-041-D | 182 | 209 | 391 | 523.717058 | 0.746586 |
-| 5 | ERP-PROV-MX-003-D | 269 | 200 | 469 | 638.307808 | 0.734755 |
-| 6 | ERP-PROV-MX-030-C | 213 | 196 | 409 | 561.644324 | 0.728219 |
-| 7 | ERP-PROV-MX-004-B | 265 | 196 | 461 | 635.040262 | 0.725938 |
-| 8 | ERP-PROV-MX-024-A | 265 | 242 | 507 | 698.625776 | 0.725710 |
-| 9 | ERP-PROV-MX-052-C | 322 | 215 | 537 | 743.987721 | 0.721786 |
-| 10 | ERP-PROV-MX-054-B | 309 | 242 | 551 | 764.175743 | 0.721038 |
+| Rank | product_id | physical_units_sold | avg_inventory_units | inventory_turnover |
+|---|---|---:|---:|---:|
+| 1 | ERP-PROV-MX-068-C | 369 | 710.32 | 0.519482 |
+| 2 | ERP-PROV-MX-015-D | 340 | 684.12 | 0.496989 |
+| 3 | ERP-PROV-MX-049-A | 365 | 742.47 | 0.491602 |
+| 4 | ERP-PROV-MX-047-B | 343 | 713.32 | 0.480849 |
+| 5 | ERP-PROV-MX-067-C | 336 | 720.83 | 0.466130 |
+| 6 | ERP-PROV-MX-036-A | 315 | 684.53 | 0.460167 |
+| 7 | ERP-PROV-MX-012-B | 241 | 525.94 | 0.458228 |
+| 8 | ERP-PROV-MX-059-B | 326 | 726.95 | 0.448451 |
+| 9 | ERP-PROV-MX-069-C | 317 | 719.08 | 0.440838 |
+| 10 | ERP-PROV-MX-053-A | 291 | 665.03 | 0.437576 |
 
 ## 6. Business Question 2 — Stockouts Over 3 Days (Last Quarter)
 
@@ -163,7 +174,7 @@ The mapping method used for each observed product is retained in `dim_product` a
 
 - **"Ventas"** is interpreted as revenue.
 - **Reporting period:** 2025-04 through 2026-03 (12 months).
-- **Currency:** physical `monto` is already MXN; e-commerce MXN rows are unchanged; e-commerce USD/EUR rows are converted with `amount_mxn = amount * rate_to_mxn`, where the rate is matched by transaction date + currency. 0 USD/EUR rows were left unmatched.
+- **Currency:** physical `monto` is already MXN; e-commerce MXN rows are unchanged; e-commerce USD/EUR rows are converted with `amount_mxn = amount * rate_to_mxn`, where the rate is matched by transaction date + currency. 0 USD/EUR rows were left unmatched. `get_q3_channel_mom()` enforces this: if any non-MXN transaction in the calculation range lacks an exchange rate for its date + currency, or an FX date + currency is duplicated, it raises a `ValueError` instead of silently dropping that revenue.
 - **MoM:** `(current_month − previous_month) / previous_month * 100`.
 - **First month (April 2025):** physical MoM uses March 2025 physical revenue as baseline (March itself is not displayed). E-commerce April 2025 is `N/A` because the supplied e-commerce dataset has no observation before April 2025 — this reflects the supplied dataset only, not a claim that Shopify sales began in April 2025.
 
@@ -220,11 +231,11 @@ The mapping method used for each observed product is retained in `dim_product` a
 
 | # | Statement | Type |
 |---|---|---|
-| A1 | `tipo_comprobante` (I/E/P/N/T) semantics are not defined in the supplied data; all values are counted as recorded in every question, with no filtering or sign reversal. | Methodological interpretation |
+| A1 | `tipo_comprobante` (I/E/P/N/T) letters match SAT's CFDI catalogue, but the supplied data does not prove this field is a CFDI export and shows no behavioral difference between codes; all values are counted as recorded in every question, with no filtering or sign reversal. | Methodological interpretation |
 | A2 | `costo_mxn` is treated as a per-unit product cost (used in Q4). | Methodological interpretation |
-| A3 | Q1 inventory turnover is conditional on observable physical inventory coverage; 54.17% of physical units fall outside an inventory series and cannot participate in that calculation. | Limitation |
+| A3 | Q1 inventory turnover is conditional on observable physical inventory coverage; 54.17% of physical units (24,018 of 44,336) fall outside an inventory series and cannot participate in that calculation. | Limitation |
 | A4 | A store-SKU combination absent from `fact_inventory`, or a `N/A` snapshot value, means "unknown," not zero. No interpolation or zero-substitution is applied anywhere. | Observed fact |
-| A5 | The e-commerce source carries no physical-store dimension; no store or fulfillment location is inferred for e-commerce transactions (affects Q1 and Q4). | Observed fact |
+| A5 | The e-commerce source carries no physical-store dimension; no store or fulfillment location is inferred for e-commerce transactions (affects Q1 and Q4). Because of this, e-commerce is excluded from Q1 (6,627 units in the period): it cannot be defensibly paired with the physical-store inventory denominator. This exclusion applies only to Q1 — e-commerce remains in `fact_sales`, fully reconciled at SKU level, and is used in Q3 and any other appropriate sales analysis. | Observed fact / Methodological interpretation |
 | A6 | The supplied e-commerce dataset has no observation before 2025-04-01; this is a property of the dataset, not evidence of when the Shopify channel actually began operating. | Observed fact / Limitation |
 | A7 | Where source data limits analytical coverage (Q1, Q4 scope), that absence is not assigned an unsupported business meaning (e.g., not described as a stockout, assortment gap, or extraction error). | Limitation |
 
@@ -238,4 +249,4 @@ python -m pytest -q
 A clean rebuild from raw sources was validated end to end:
 
 - Q1, Q2, Q3, and Q4 results reproduced exactly as documented above.
-- Full test suite: **36 passed**.
+- Full test suite: **41 passed**.

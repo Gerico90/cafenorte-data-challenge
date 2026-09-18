@@ -52,10 +52,10 @@ def test_q1_inventory_turnover_calculation(tmp_path):
         ('S3', '2025-10-03', 'ERP-B', 'physical',  'T001',  8,  80, 'MXN', 'E'),
         -- ERP-A, T003: physical sale with NO inventory series at all for
         -- this store-product pair -- must be excluded from Q1 turnover
-        -- (audit 16 matched-population rule) while still landing in
+        -- (matched-population rule) while still landing in
         -- fact_sales (not deleted from the analytical model).
         ('S4', '2025-10-04', 'ERP-A', 'physical',  'T003', 100, 1000, 'MXN', 'I'),
-        -- Outside the accepted Q1 period (2025-10-01..2026-03-31) --
+        -- Outside the Question 1 reporting period (2025-10-01..2026-03-31) --
         -- must not be counted.
         ('S5', '2026-04-01', 'ERP-A', 'physical',  'T001', 999, 9999, 'MXN', 'I')
     """)
@@ -103,26 +103,23 @@ def test_q1_inventory_turnover_calculation(tmp_path):
     ].iloc[0]
 
     # Product A:
-    # physical units = 10 (T001, matched) -- the 100 units sold at T003
-    # (no inventory series) and the 999 units sold outside the Q1 window
-    # are both excluded.
-    # ecommerce units = 5 (participates at SKU level, no store match
-    # required)
-    # total_units_sold = 15
+    # physical units sold = 10 (T001, matched) -- the 100 units sold at
+    # T003 (no inventory series) and the 999 units sold outside the Q1
+    # window are both excluded. The 5 ecommerce units (S2) never
+    # participate in Q1 at all -- ecommerce is excluded from this
+    # metric entirely, regardless of SKU.
     #
     # T001 average stock = (10 + 0) / 2 = 5 (NULL excluded from AVG,
     # not interpolated, not zero-filled)
     # T002 average stock = (5 + 5 + 5) / 3 = 5
     # average_inventory_units = 5 + 5 = 10
     #
-    # turnover = 15 / 10 = 1.5
+    # turnover = 10 / 10 = 1.0
 
-    assert product_a["physical_units"] == 10
-    assert product_a["ecommerce_units"] == 5
-    assert product_a["total_units_sold"] == 15
+    assert product_a["physical_units_sold"] == 10
 
     assert product_a["average_inventory_units"] == pytest.approx(10.0)
-    assert product_a["inventory_turnover"] == pytest.approx(1.5)
+    assert product_a["inventory_turnover"] == pytest.approx(1.0)
 
     assert product_a["inventory_coverage_pct"] == pytest.approx(
         83.33,
@@ -139,13 +136,120 @@ def test_q1_inventory_turnover_calculation(tmp_path):
     # Product A should rank above Product B.
     assert result.iloc[0]["sku_erp"] == "ERP-A"
 
+    # Ecommerce no longer participates in Q1 at all: there is no
+    # ecommerce/total-units column left to accidentally leak channel
+    # mixing back into the numerator.
+    assert "ecommerce_units" not in result.columns
+    assert "total_units_sold" not in result.columns
+
+
+def test_q1_ecommerce_sale_never_changes_turnover_for_same_sku(tmp_path):
+    """
+    An ecommerce sale for a SKU must not change that SKU's Q1 turnover
+    at all -- not by adding to the numerator, not by any other path.
+    Proven by building two otherwise-identical databases that differ
+    only in the presence of a (large) ecommerce order, and asserting
+    the resulting turnover is identical.
+    """
+
+    def _build(tmp_path, db_name, include_ecommerce):
+        database_path = tmp_path / db_name
+        connection = duckdb.connect(str(database_path))
+
+        connection.execute("""
+            CREATE TABLE dim_product (
+                product_id VARCHAR,
+                product_name VARCHAR,
+                category VARCHAR
+            )
+        """)
+        connection.execute("""
+            INSERT INTO dim_product VALUES ('ERP-E', 'Product E', 'test')
+        """)
+
+        connection.execute("""
+            CREATE TABLE fact_sales (
+                transaction_id VARCHAR,
+                sold_at TIMESTAMP,
+                product_id VARCHAR,
+                channel VARCHAR,
+                store_id VARCHAR,
+                quantity INTEGER,
+                amount_native DOUBLE,
+                currency VARCHAR,
+                document_type VARCHAR
+            )
+        """)
+
+        connection.execute("""
+            INSERT INTO fact_sales VALUES
+            ('S1', '2025-10-01', 'ERP-E', 'physical', 'T001', 10, 100, 'MXN', 'I')
+        """)
+
+        if include_ecommerce:
+            # A large ecommerce order for the SAME SKU -- if ecommerce
+            # ever leaked into the numerator this would move turnover
+            # a lot (from 10 to 1010 units).
+            connection.execute("""
+                INSERT INTO fact_sales VALUES
+                ('S2', '2025-10-02', 'ERP-E', 'ecommerce', NULL, 1000, 10000, 'MXN', NULL)
+            """)
+
+        connection.execute("""
+            CREATE TABLE fact_inventory (
+                date DATE,
+                store_id VARCHAR,
+                product_id VARCHAR,
+                stock_quantity INTEGER
+            )
+        """)
+        connection.execute("""
+            INSERT INTO fact_inventory VALUES
+            ('2025-10-01', 'T001', 'ERP-E', 10),
+            ('2025-10-02', 'T001', 'ERP-E', 10)
+        """)
+
+        connection.close()
+        return database_path
+
+    without_ecommerce = _build(
+        tmp_path, "q1_no_ecom.duckdb", include_ecommerce=False
+    )
+    with_ecommerce = _build(
+        tmp_path, "q1_with_ecom.duckdb", include_ecommerce=True
+    )
+
+    result_without = get_q1_inventory_turnover(
+        database_path=without_ecommerce, limit=10
+    )
+    result_with = get_q1_inventory_turnover(
+        database_path=with_ecommerce, limit=10
+    )
+
+    row_without = result_without[
+        result_without["sku_erp"] == "ERP-E"
+    ].iloc[0]
+    row_with = result_with[
+        result_with["sku_erp"] == "ERP-E"
+    ].iloc[0]
+
+    # physical_units_sold, average_inventory_units, and inventory_turnover
+    # must be identical whether or not the ecommerce order exists.
+    assert row_without["physical_units_sold"] == 10
+    assert row_with["physical_units_sold"] == 10
+
+    assert row_with["inventory_turnover"] == pytest.approx(
+        row_without["inventory_turnover"]
+    )
+    assert row_with["inventory_turnover"] == pytest.approx(1.0)
+
 
 def test_q1_excludes_sales_outside_matched_inventory_population(tmp_path):
     """
     A store-SKU pair with physical sales but no observable inventory
     series anywhere must not contribute to Q1 turnover, even though its
     SKU otherwise has an eligible average_inventory_units from other
-    stores (audit 16 matched-population rule).
+    stores (matched-population rule).
     """
 
     database_path = tmp_path / "test_unmatched.duckdb"
@@ -217,9 +321,7 @@ def test_q1_excludes_sales_outside_matched_inventory_population(tmp_path):
     # Only the T010 sale (matched to an observable inventory series)
     # counts; the T020 sale (50 units, no inventory series) must be
     # excluded even though it is far larger.
-    assert product_c["physical_units"] == 4
-    assert product_c["ecommerce_units"] == 0
-    assert product_c["total_units_sold"] == 4
+    assert product_c["physical_units_sold"] == 4
     assert product_c["average_inventory_units"] == pytest.approx(8.0)
     assert product_c["inventory_turnover"] == pytest.approx(0.5)
 
@@ -270,8 +372,8 @@ def test_q1_all_null_store_sku_excluded_from_denominator_not_zeroed(
 
     connection.execute("""
         INSERT INTO fact_sales VALUES
-        -- TA has an observable series (all-NULL) -> still an eligible
-        -- matched population for the numerator per audit 16, but its
+        -- TA has an observable series (all-NULL) -> still eligible for
+        -- the numerator under the matched-population rule, but its
         -- inventory average must be UNKNOWN, not zero.
         ('S1', '2025-10-01', 'ERP-Z', 'physical', 'TA', 10, 100, 'MXN', 'I'),
         -- TB has a valid numeric series including a genuine zero.
@@ -322,8 +424,7 @@ def test_q1_all_null_store_sku_excluded_from_denominator_not_zeroed(
 
     # Physical sales: TA is still matched (it has an observable series,
     # even though every reading is NULL) so both stores' units count.
-    assert product_z["physical_units"] == 13
-    assert product_z["total_units_sold"] == 13
+    assert product_z["physical_units_sold"] == 13
 
     # turnover = 13 / 2 = 6.5
     assert product_z["inventory_turnover"] == pytest.approx(6.5)
@@ -422,7 +523,7 @@ def test_q2_stockout_boundary_and_scattered_zero_scenarios(
     tmp_path,
 ):
     """
-    Verify the closed Q2 rule at its edges:
+    Verify the Question 2 rule (more than 3 consecutive zero days) at its edges:
       - exactly 3 consecutive numeric-zero days does NOT qualify
       - exactly 4 consecutive numeric-zero days DOES qualify
       - "N/A" (NULL) inside a zero run interrupts the confirmed
@@ -880,6 +981,93 @@ def test_q3_ecommerce_subsequent_months_use_previous_displayed_month(tmp_path):
     # June uses May normally:
     # (750 - 1500) / 1500 * 100 = -50.0
     assert _mom_pct(result, "2025-06-01", "ecommerce") == pytest.approx(-50.0)
+
+
+def test_q3_missing_exchange_rate_raises_instead_of_dropping_revenue(tmp_path):
+    """
+    A non-MXN sale whose transaction date + currency has no exchange
+    rate must fail loudly. Without the gate its revenue would become
+    NULL and be silently ignored by SUM().
+    """
+
+    database_path = _build_q3_database(
+        tmp_path,
+        "q3_missing_fx.duckdb",
+        fact_sales_rows=[
+            ("S1", "2025-04-10 10:00:00", "ecommerce", 10.0, "USD"),
+            ("S2", "2025-04-11 10:00:00", "ecommerce", 10.0, "USD"),
+        ],
+        # Rate exists for 2025-04-10 only; 2025-04-11 is missing.
+        fact_exchange_rate_rows=[("2025-04-10", "USD", 20.0)],
+    )
+
+    with pytest.raises(ValueError, match="no exchange rate") as error:
+        get_q3_channel_mom(database_path=database_path)
+
+    assert "USD on 2025-04-11" in str(error.value)
+
+
+def test_q3_missing_exchange_rate_for_march_baseline_also_raises(tmp_path):
+    """The March 2025 baseline month is part of the calculation range."""
+
+    database_path = _build_q3_database(
+        tmp_path,
+        "q3_missing_fx_baseline.duckdb",
+        fact_sales_rows=[
+            ("S1", "2025-03-20 10:00:00", "ecommerce", 10.0, "EUR"),
+        ],
+        fact_exchange_rate_rows=[],
+    )
+
+    with pytest.raises(ValueError, match="no exchange rate"):
+        get_q3_channel_mom(database_path=database_path)
+
+
+def test_q3_duplicate_exchange_rate_for_date_and_currency_raises(tmp_path):
+    database_path = _build_q3_database(
+        tmp_path,
+        "q3_duplicate_fx.duckdb",
+        fact_sales_rows=[
+            ("S1", "2025-04-10 10:00:00", "ecommerce", 10.0, "USD"),
+        ],
+        fact_exchange_rate_rows=[
+            ("2025-04-10", "USD", 20.0),
+            ("2025-04-10", "USD", 21.0),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="multiple exchange rates"):
+        get_q3_channel_mom(database_path=database_path)
+
+
+def test_q3_complete_exchange_rate_coverage_keeps_conversion_result(tmp_path):
+    """
+    With a rate for every non-MXN transaction date + currency the gate
+    stays silent and the accepted conversion is unchanged:
+    amount_mxn = amount * rate_to_mxn.
+    """
+
+    database_path = _build_q3_database(
+        tmp_path,
+        "q3_complete_fx.duckdb",
+        fact_sales_rows=[
+            ("S1", "2025-04-10 10:00:00", "ecommerce", 10.0, "USD"),
+            ("S2", "2025-04-11 10:00:00", "ecommerce", 10.0, "EUR"),
+            ("S3", "2025-04-12 10:00:00", "ecommerce", 100.0, "MXN"),
+        ],
+        fact_exchange_rate_rows=[
+            ("2025-04-10", "USD", 20.0),
+            ("2025-04-11", "EUR", 22.0),
+            # Unused rates must not matter.
+            ("2025-04-10", "EUR", 21.0),
+        ],
+    )
+
+    result = get_q3_channel_mom(database_path=database_path)
+
+    assert len(result) == 24
+    # 10 * 20 + 10 * 22 + 100 = 520
+    assert _sales_mxn(result, "2025-04-01", "ecommerce") == pytest.approx(520.0)
 
 
 # ---------------------------------------------------------------------

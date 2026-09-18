@@ -13,15 +13,21 @@ def get_q1_inventory_turnover(
     limit: int = 10,
 ) -> pd.DataFrame:
     """
-    Return the top SKUs by inventory turnover for the accepted Q1
-    period (2025-10-01 through 2026-03-31 inclusive).
+    Return the top SKUs by inventory turnover for the Question 1
+    reporting period (2025-10-01 through 2026-03-31 inclusive).
+
+    This is a PHYSICAL-STORE-ONLY metric:
+    "Inventory turnover over physical store-product combinations for
+    which both sales and inventory are observable." It is not total
+    company-wide turnover, not omnichannel turnover, and not complete
+    CaféNorte turnover.
 
     Turnover =
-        total_units_sold / average_inventory_units
+        physical_units_sold / average_inventory_units
 
     Grain: SKU/product level (sku_erp).
 
-    Inventory denominator (per accepted Q1 decisions, audits 08/11/16):
+    Inventory denominator (average physical-store inventory):
     - For each store-SKU combination with an observable inventory
       series (at least one inventory snapshot row in the period),
       compute its average inventory over the period.
@@ -32,26 +38,31 @@ def get_q1_inventory_turnover(
     - The per-store averages are summed to obtain average_inventory_units
       at SKU level.
 
-    Physical sales numerator (audit 16 - matched population rule):
+    Physical sales numerator (matched-population rule):
     - Physical sales are included only for store-SKU combinations that
       have an observable inventory series in the period.
     - No inventory is imputed for physical store-SKU combinations with
       sales but no inventory series; those sales stay in fact_sales but
       are excluded from this Q1 calculation only.
 
-    tipo_comprobante (document_type) (audit 18):
+    tipo_comprobante (document_type):
     - I, E, P, N, T are all included exactly as recorded.
     - cantidad (quantity) is used positive as recorded.
     - No filtering, no sign adjustment.
 
-    Ecommerce (audit 17 context, final decision overrides its proposed
-    exclusion - ecommerce PARTICIPATES at SKU level):
-    - Ecommerce units are reconciled to sku_erp upstream (src/reconcile.py)
-      and added to the Q1 numerator for that SKU.
-    - Ecommerce is never assigned to a physical store, no fulfillment
-      store is inferred, and it is never excluded for lacking store_id -
-      it is therefore not subject to the store-level inventory-matching
-      rule that applies to physical sales.
+    Ecommerce is EXCLUDED from Q1 entirely (methodological scope
+    decision):
+    - Q1 is an inventory-turnover metric. The population-consistency
+      principle already applied to physical sales (only store-SKU pairs
+      with an observable inventory series participate) must also apply
+      to ecommerce. The ecommerce source tells us which SKU was sold and
+      how many units, but never which store, warehouse, fulfillment
+      location, or inventory pool supplied the order. The only supplied
+      inventory snapshots are store-level physical inventory, so
+      ecommerce sales cannot be defensibly paired with that denominator.
+    - This does NOT invalidate ecommerce sales: they remain in
+      fact_sales, available to Q3 and any other sales analysis. They are
+      excluded ONLY from this Q1 turnover calculation.
     """
 
     connection = duckdb.connect(
@@ -120,11 +131,13 @@ def get_q1_inventory_turnover(
 
         physical_sales_eligible AS (
             -- Physical sales counted only for store-SKU pairs with an
-            -- observable inventory series (audit 16 matched population).
+            -- observable inventory series (matched-population rule).
+            -- Ecommerce never participates in Q1: it cannot be paired
+            -- with a store-level inventory denominator (see docstring).
             SELECT
                 s.product_id,
 
-                SUM(s.quantity) AS physical_units
+                SUM(s.quantity) AS physical_units_sold
 
             FROM fact_sales AS s
             CROSS JOIN q1_window AS w
@@ -139,25 +152,6 @@ def get_q1_inventory_turnover(
 
             GROUP BY
                 s.product_id
-        ),
-
-        ecommerce_sales AS (
-            -- Ecommerce participates at SKU level with no store
-            -- attribution and no inventory-matching requirement.
-            SELECT
-                s.product_id,
-
-                SUM(s.quantity) AS ecommerce_units
-
-            FROM fact_sales AS s
-            CROSS JOIN q1_window AS w
-
-            WHERE s.channel = 'ecommerce'
-                AND CAST(s.sold_at AS DATE)
-                    BETWEEN w.start_date AND w.end_date
-
-            GROUP BY
-                s.product_id
         )
 
         SELECT
@@ -165,10 +159,7 @@ def get_q1_inventory_turnover(
             p.product_name,
             p.category,
 
-            COALESCE(ph.physical_units, 0) AS physical_units,
-            COALESCE(ec.ecommerce_units, 0) AS ecommerce_units,
-            COALESCE(ph.physical_units, 0)
-                + COALESCE(ec.ecommerce_units, 0) AS total_units_sold,
+            COALESCE(ph.physical_units_sold, 0) AS physical_units_sold,
 
             inv.average_inventory_units,
             inv.store_count,
@@ -183,10 +174,7 @@ def get_q1_inventory_turnover(
             CASE
                 WHEN inv.average_inventory_units > 0
                 THEN
-                    (
-                        COALESCE(ph.physical_units, 0)
-                        + COALESCE(ec.ecommerce_units, 0)
-                    )
+                    COALESCE(ph.physical_units_sold, 0)
                     / inv.average_inventory_units
                 ELSE NULL
             END AS inventory_turnover
@@ -195,9 +183,6 @@ def get_q1_inventory_turnover(
 
         LEFT JOIN physical_sales_eligible AS ph
             ON p.product_id = ph.product_id
-
-        LEFT JOIN ecommerce_sales AS ec
-            ON p.product_id = ec.product_id
 
         LEFT JOIN inventory_by_product AS inv
             ON p.product_id = inv.product_id
@@ -223,8 +208,8 @@ def get_q2_stockouts(
 ) -> pd.DataFrame:
     """
     Return store-product stockout events lasting more than
-    3 consecutive calendar days during the closed Q2 period
-    (2026-01-01 through 2026-03-31 inclusive).
+    3 consecutive calendar days during the Question 2 reporting period
+    (last complete quarter: 2026-01-01 through 2026-03-31 inclusive).
 
     A day is a confirmed zero-stock day only when stock_quantity
     is numeric 0. NULL (source "N/A") is unknown -- never zero --
@@ -326,13 +311,13 @@ def get_q3_channel_mom(
 ) -> pd.DataFrame:
     """
     Return month-over-month (MoM) sales growth by channel (physical vs.
-    e-commerce) for the closed Q3 reporting window
+    e-commerce) for the Question 3 reporting window
     (2025-04-01 through 2026-03-31 inclusive -- exactly 12 calendar
     months).
 
     "Ventas" = revenue in MXN.
 
-    Currency normalization (closed Q3 rules):
+    Currency normalization (accepted Q3 methodology):
     - Physical (sales.csv, field `monto`): already MXN, used as-is. No
       conversion, no filtering, no sign adjustment. tipo_comprobante
       I/E/P/N/T are all included exactly as recorded.
@@ -362,6 +347,13 @@ def get_q3_channel_mom(
 
     Grain: one row per (month, channel) -- 12 months x 2 channels = 24
     rows.
+
+    Data integrity:
+    - Every non-MXN transaction in the calculation range (including the
+      March 2025 baseline month) must resolve to exactly one exchange
+      rate for its calendar date + currency. If a rate is missing or
+      duplicated, this function raises ValueError rather than letting
+      the affected revenue silently drop out of SUM().
     """
 
     connection = duckdb.connect(
@@ -370,6 +362,56 @@ def get_q3_channel_mom(
     )
 
     try:
+        missing_rates = connection.execute("""
+            SELECT DISTINCT
+                s.currency,
+                CAST(s.sold_at AS DATE) AS transaction_date
+            FROM fact_sales AS s
+            LEFT JOIN fact_exchange_rate AS fx
+                ON fx.currency = s.currency
+                AND fx.rate_date = CAST(s.sold_at AS DATE)
+            WHERE s.currency <> 'MXN'
+                AND CAST(s.sold_at AS DATE) >= DATE '2025-03-01'
+                AND CAST(s.sold_at AS DATE) <= DATE '2026-03-31'
+                AND fx.rate_to_mxn IS NULL
+            ORDER BY transaction_date, s.currency
+        """).fetchall()
+
+        if missing_rates:
+            preview = ", ".join(
+                f"{currency} on {transaction_date}"
+                for currency, transaction_date in missing_rates[:10]
+            )
+
+            raise ValueError(
+                "Q3 data-integrity failure: "
+                f"{len(missing_rates)} currency/date combination(s) "
+                "with non-MXN sales have no exchange rate "
+                f"(first {min(len(missing_rates), 10)}: {preview}). "
+                "Refusing to drop that revenue silently."
+            )
+
+        duplicate_rates = connection.execute("""
+            SELECT currency, rate_date, COUNT(*) AS rate_count
+            FROM fact_exchange_rate
+            GROUP BY currency, rate_date
+            HAVING COUNT(*) > 1
+            ORDER BY rate_date, currency
+        """).fetchall()
+
+        if duplicate_rates:
+            preview = ", ".join(
+                f"{currency} on {rate_date}"
+                for currency, rate_date, _ in duplicate_rates[:10]
+            )
+
+            raise ValueError(
+                "Q3 data-integrity failure: multiple exchange rates "
+                "exist for the same date and currency "
+                f"(first {min(len(duplicate_rates), 10)}: {preview}). "
+                "Refusing to pick one silently."
+            )
+
         query = """
         WITH normalized_sales AS (
             -- Per-transaction revenue normalized to MXN. Physical rows
@@ -482,9 +524,9 @@ def get_q4_negative_margin(
     """
     Return store + SKU (sku_erp) combinations with negative aggregate
     margin over the full available physical sales history
-    (2024-10-01 through 2026-03-31 inclusive) -- closed Q4 rules.
+    (2024-10-01 through 2026-03-31 inclusive) -- accepted Q4 methodology.
 
-    Population (closed Q4 rules):
+    Population (accepted Q4 methodology):
     - Physical sales only (fact_sales.channel = 'physical'). Ecommerce
       is never included in this store-level answer, is never assigned
       to a physical store, and no fulfillment location is inferred --
@@ -496,7 +538,7 @@ def get_q4_negative_margin(
       canonical bridge (src/reconcile.py), applied upstream when
       fact_sales was built. It is not re-evaluated here.
 
-    Cost (closed Q4 rules):
+    Cost (accepted Q4 methodology):
     - Source: fact_product_cost (fecha_vigencia -> effective_date,
       costo_mxn -> cost_mxn), the full, non-collapsed cost history.
     - costo_mxn is treated as a per-unit product cost.
