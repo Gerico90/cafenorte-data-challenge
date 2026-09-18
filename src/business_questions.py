@@ -13,15 +13,45 @@ def get_q1_inventory_turnover(
     limit: int = 10,
 ) -> pd.DataFrame:
     """
-    Return the top SKUs by inventory turnover for the latest
-    six calendar months available in the inventory data.
+    Return the top SKUs by inventory turnover for the accepted Q1
+    period (2025-10-01 through 2026-03-31 inclusive).
 
     Turnover =
-        total units sold across physical + ecommerce channels
-        / average ERP inventory
+        total_units_sold / average_inventory_units
 
-    Source inventory N/A values remain NULL and are therefore
-    excluded from AVG calculations rather than treated as zero.
+    Grain: SKU/product level (sku_erp).
+
+    Inventory denominator (per accepted Q1 decisions, audits 08/11/16):
+    - For each store-SKU combination with an observable inventory
+      series (at least one inventory snapshot row in the period),
+      compute its average inventory over the period.
+    - Numeric 0 is included in that average.
+    - N/A / NULL inventory readings are excluded from the average
+      (never interpolated, never replaced with zero) via SQL AVG's
+      native NULL-skipping behavior.
+    - The per-store averages are summed to obtain average_inventory_units
+      at SKU level.
+
+    Physical sales numerator (audit 16 - matched population rule):
+    - Physical sales are included only for store-SKU combinations that
+      have an observable inventory series in the period.
+    - No inventory is imputed for physical store-SKU combinations with
+      sales but no inventory series; those sales stay in fact_sales but
+      are excluded from this Q1 calculation only.
+
+    tipo_comprobante (document_type) (audit 18):
+    - I, E, P, N, T are all included exactly as recorded.
+    - cantidad (quantity) is used positive as recorded.
+    - No filtering, no sign adjustment.
+
+    Ecommerce (audit 17 context, final decision overrides its proposed
+    exclusion - ecommerce PARTICIPATES at SKU level):
+    - Ecommerce units are reconciled to sku_erp upstream (src/reconcile.py)
+      and added to the Q1 numerator for that SKU.
+    - Ecommerce is never assigned to a physical store, no fulfillment
+      store is inferred, and it is never excluded for lacking store_id -
+      it is therefore not subject to the store-level inventory-matching
+      rule that applies to physical sales.
     """
 
     connection = duckdb.connect(
@@ -31,44 +61,23 @@ def get_q1_inventory_turnover(
 
     try:
         query = """
-        WITH analysis_window AS (
+        WITH q1_window AS (
             SELECT
-                MAX(date) AS end_date,
-                DATE_TRUNC('month', MAX(date))
-                    - INTERVAL '5 months' AS start_date
-            FROM fact_inventory
+                DATE '2025-10-01' AS start_date,
+                DATE '2026-03-31' AS end_date
         ),
 
-        sales_6m AS (
-            SELECT
-                s.product_id,
+        inventory_observed AS (
+            -- Store-SKU combinations with an observable inventory
+            -- series (any snapshot row) in the Q1 period.
+            SELECT DISTINCT
+                i.store_id,
+                i.product_id
+            FROM fact_inventory AS i
+            CROSS JOIN q1_window AS w
 
-                SUM(
-                    CASE
-                        WHEN s.channel = 'physical'
-                        THEN s.quantity
-                        ELSE 0
-                    END
-                ) AS physical_units,
-
-                SUM(
-                    CASE
-                        WHEN s.channel = 'ecommerce'
-                        THEN s.quantity
-                        ELSE 0
-                    END
-                ) AS ecommerce_units,
-
-                SUM(s.quantity) AS total_units_sold
-
-            FROM fact_sales AS s
-            CROSS JOIN analysis_window AS w
-
-            WHERE CAST(s.sold_at AS DATE)
+            WHERE CAST(i.date AS DATE)
                 BETWEEN w.start_date AND w.end_date
-
-            GROUP BY
-                s.product_id
         ),
 
         inventory_by_store_product AS (
@@ -82,9 +91,9 @@ def get_q1_inventory_turnover(
                 COUNT(*) AS expected_days
 
             FROM fact_inventory AS i
-            CROSS JOIN analysis_window AS w
+            CROSS JOIN q1_window AS w
 
-            WHERE i.date
+            WHERE CAST(i.date AS DATE)
                 BETWEEN w.start_date AND w.end_date
 
             GROUP BY
@@ -96,7 +105,7 @@ def get_q1_inventory_turnover(
             SELECT
                 product_id,
 
-                SUM(avg_stock) AS avg_inventory,
+                SUM(avg_stock) AS average_inventory_units,
 
                 COUNT(DISTINCT store_id) AS store_count,
 
@@ -107,44 +116,93 @@ def get_q1_inventory_turnover(
 
             GROUP BY
                 product_id
+        ),
+
+        physical_sales_eligible AS (
+            -- Physical sales counted only for store-SKU pairs with an
+            -- observable inventory series (audit 16 matched population).
+            SELECT
+                s.product_id,
+
+                SUM(s.quantity) AS physical_units
+
+            FROM fact_sales AS s
+            CROSS JOIN q1_window AS w
+
+            INNER JOIN inventory_observed AS io
+                ON s.store_id = io.store_id
+                AND s.product_id = io.product_id
+
+            WHERE s.channel = 'physical'
+                AND CAST(s.sold_at AS DATE)
+                    BETWEEN w.start_date AND w.end_date
+
+            GROUP BY
+                s.product_id
+        ),
+
+        ecommerce_sales AS (
+            -- Ecommerce participates at SKU level with no store
+            -- attribution and no inventory-matching requirement.
+            SELECT
+                s.product_id,
+
+                SUM(s.quantity) AS ecommerce_units
+
+            FROM fact_sales AS s
+            CROSS JOIN q1_window AS w
+
+            WHERE s.channel = 'ecommerce'
+                AND CAST(s.sold_at AS DATE)
+                    BETWEEN w.start_date AND w.end_date
+
+            GROUP BY
+                s.product_id
         )
 
         SELECT
-            p.product_id,
+            p.product_id AS sku_erp,
             p.product_name,
             p.category,
 
-            COALESCE(s.physical_units, 0) AS physical_units,
-            COALESCE(s.ecommerce_units, 0) AS ecommerce_units,
-            COALESCE(s.total_units_sold, 0) AS total_units_sold,
+            COALESCE(ph.physical_units, 0) AS physical_units,
+            COALESCE(ec.ecommerce_units, 0) AS ecommerce_units,
+            COALESCE(ph.physical_units, 0)
+                + COALESCE(ec.ecommerce_units, 0) AS total_units_sold,
 
-            i.avg_inventory,
-            i.store_count,
+            inv.average_inventory_units,
+            inv.store_count,
 
             ROUND(
                 100.0
-                * i.observed_inventory_days
-                / i.expected_inventory_days,
+                * inv.observed_inventory_days
+                / inv.expected_inventory_days,
                 2
             ) AS inventory_coverage_pct,
 
             CASE
-                WHEN i.avg_inventory > 0
+                WHEN inv.average_inventory_units > 0
                 THEN
-                    COALESCE(s.total_units_sold, 0)
-                    / i.avg_inventory
+                    (
+                        COALESCE(ph.physical_units, 0)
+                        + COALESCE(ec.ecommerce_units, 0)
+                    )
+                    / inv.average_inventory_units
                 ELSE NULL
             END AS inventory_turnover
 
         FROM dim_product AS p
 
-        LEFT JOIN sales_6m AS s
-            ON p.product_id = s.product_id
+        LEFT JOIN physical_sales_eligible AS ph
+            ON p.product_id = ph.product_id
 
-        LEFT JOIN inventory_by_product AS i
-            ON p.product_id = i.product_id
+        LEFT JOIN ecommerce_sales AS ec
+            ON p.product_id = ec.product_id
 
-        WHERE i.avg_inventory IS NOT NULL
+        LEFT JOIN inventory_by_product AS inv
+            ON p.product_id = inv.product_id
+
+        WHERE inv.average_inventory_units IS NOT NULL
 
         ORDER BY
             inventory_turnover DESC NULLS LAST
@@ -165,10 +223,13 @@ def get_q2_stockouts(
 ) -> pd.DataFrame:
     """
     Return store-product stockout events lasting more than
-    3 consecutive days during the latest calendar quarter
-    available in inventory data.
+    3 consecutive calendar days during the closed Q2 period
+    (2026-01-01 through 2026-03-31 inclusive).
 
-    NULL inventory values break a zero-stock streak.
+    A day is a confirmed zero-stock day only when stock_quantity
+    is numeric 0. NULL (source "N/A") is unknown -- never zero --
+    and therefore breaks/interrupts a zero-stock streak rather than
+    extending it.
     """
 
     connection = duckdb.connect(
@@ -180,14 +241,8 @@ def get_q2_stockouts(
         query = """
         WITH quarter_window AS (
             SELECT
-                CAST(
-                    DATE_TRUNC('quarter', MAX(date))
-                    AS DATE
-                ) AS start_date,
-
-                CAST(MAX(date) AS DATE) AS end_date
-
-            FROM fact_inventory
+                DATE '2026-01-01' AS start_date,
+                DATE '2026-03-31' AS end_date
         ),
 
         zero_days AS (
@@ -258,6 +313,384 @@ def get_q2_stockouts(
             e.store_id,
             e.product_id,
             e.stockout_start
+        """
+
+        return connection.execute(query).fetchdf()
+
+    finally:
+        connection.close()
+
+
+def get_q3_channel_mom(
+    database_path: Path = DATABASE_PATH,
+) -> pd.DataFrame:
+    """
+    Return month-over-month (MoM) sales growth by channel (physical vs.
+    e-commerce) for the closed Q3 reporting window
+    (2025-04-01 through 2026-03-31 inclusive -- exactly 12 calendar
+    months).
+
+    "Ventas" = revenue in MXN.
+
+    Currency normalization (closed Q3 rules):
+    - Physical (sales.csv, field `monto`): already MXN, used as-is. No
+      conversion, no filtering, no sign adjustment. tipo_comprobante
+      I/E/P/N/T are all included exactly as recorded.
+    - E-commerce (ecommerce_orders.parquet, field `amount`):
+        - MXN rows: amount unchanged.
+        - USD/EUR rows: amount_mxn = amount * rate_to_mxn, where
+          rate_to_mxn comes from fact_exchange_rate matched by the
+          transaction's calendar date and currency.
+    - E-commerce is never assigned to a physical store and no
+      fulfillment location is inferred.
+
+    Monthly aggregation happens strictly AFTER per-transaction currency
+    normalization: monthly_sales_mxn = SUM(amount_mxn) per channel per
+    calendar month.
+
+    MoM_pct = (current_month_sales_mxn - previous_month_sales_mxn)
+              / previous_month_sales_mxn * 100
+
+    First displayed month (April 2025):
+    - Physical: MoM uses March 2025 physical revenue as the t-1
+      baseline. March 2025 is used only for that calculation and is
+      NOT part of the displayed 12-month table (filtered out below).
+    - E-commerce: MoM is NULL because the supplied e-commerce source
+      has no observation before April 2025. This is a property of the
+      supplied dataset, not evidence the e-commerce channel began in
+      April -- no such inference is made here.
+
+    Grain: one row per (month, channel) -- 12 months x 2 channels = 24
+    rows.
+    """
+
+    connection = duckdb.connect(
+        str(database_path),
+        read_only=True,
+    )
+
+    try:
+        query = """
+        WITH normalized_sales AS (
+            -- Per-transaction revenue normalized to MXN. Physical rows
+            -- are MXN already. E-commerce MXN rows pass through
+            -- unchanged; USD/EUR rows are converted using the rate
+            -- matched by transaction calendar date + currency.
+            SELECT
+                s.channel,
+                CAST(s.sold_at AS DATE) AS transaction_date,
+                CASE
+                    WHEN s.currency = 'MXN' THEN s.amount_native
+                    WHEN fx.rate_to_mxn IS NOT NULL
+                        THEN s.amount_native * fx.rate_to_mxn
+                    ELSE NULL
+                END AS amount_mxn
+            FROM fact_sales AS s
+            LEFT JOIN fact_exchange_rate AS fx
+                ON fx.currency = s.currency
+                AND fx.rate_date = CAST(s.sold_at AS DATE)
+            WHERE s.channel IN ('physical', 'ecommerce')
+        ),
+
+        monthly_sales AS (
+            -- Aggregation occurs strictly AFTER currency normalization.
+            -- March 2025 is included here only to serve as the
+            -- physical t-1 baseline for April 2025; it is filtered
+            -- out of the final displayed output below.
+            SELECT
+                channel,
+                DATE_TRUNC('month', transaction_date) AS month_start,
+                SUM(amount_mxn) AS monthly_sales_mxn
+            FROM normalized_sales
+            WHERE transaction_date >= DATE '2025-03-01'
+                AND transaction_date <= DATE '2026-03-31'
+            GROUP BY
+                channel,
+                DATE_TRUNC('month', transaction_date)
+        ),
+
+        calendar_months AS (
+            SELECT CAST(generate_series AS DATE) AS month_start
+            FROM generate_series(
+                DATE '2025-03-01',
+                DATE '2026-03-01',
+                INTERVAL 1 MONTH
+            )
+        ),
+
+        channels AS (
+            SELECT UNNEST(['physical', 'ecommerce']) AS channel
+        ),
+
+        full_series AS (
+            -- Every (channel, month) combination is represented, even
+            -- when a channel has no observed transactions in a given
+            -- month, so LAG() sees a true absence (NULL) rather than
+            -- silently skipping a month.
+            SELECT
+                ch.channel,
+                cal.month_start,
+                ms.monthly_sales_mxn
+            FROM channels AS ch
+            CROSS JOIN calendar_months AS cal
+            LEFT JOIN monthly_sales AS ms
+                ON ms.channel = ch.channel
+                AND ms.month_start = cal.month_start
+        ),
+
+        with_mom AS (
+            SELECT
+                channel,
+                month_start,
+                monthly_sales_mxn,
+                LAG(monthly_sales_mxn) OVER (
+                    PARTITION BY channel
+                    ORDER BY month_start
+                ) AS previous_month_sales_mxn
+            FROM full_series
+        )
+
+        SELECT
+            month_start AS month,
+            channel,
+            monthly_sales_mxn AS sales_mxn,
+            CASE
+                WHEN previous_month_sales_mxn IS NULL THEN NULL
+                ELSE ROUND(
+                    (monthly_sales_mxn - previous_month_sales_mxn)
+                    / previous_month_sales_mxn * 100,
+                    2
+                )
+            END AS mom_pct
+        FROM with_mom
+        WHERE month_start >= DATE '2025-04-01'
+            AND month_start <= DATE '2026-03-01'
+        ORDER BY
+            month_start,
+            channel
+        """
+
+        return connection.execute(query).fetchdf()
+
+    finally:
+        connection.close()
+
+
+def get_q4_negative_margin(
+    database_path: Path = DATABASE_PATH,
+) -> pd.DataFrame:
+    """
+    Return store + SKU (sku_erp) combinations with negative aggregate
+    margin over the full available physical sales history
+    (2024-10-01 through 2026-03-31 inclusive) -- closed Q4 rules.
+
+    Population (closed Q4 rules):
+    - Physical sales only (fact_sales.channel = 'physical'). Ecommerce
+      is never included in this store-level answer, is never assigned
+      to a physical store, and no fulfillment location is inferred --
+      its schema cannot answer the requested "en que tiendas" (which
+      stores) dimension.
+    - tipo_comprobante (document_type) I, E, P, N, T are all included
+      exactly as recorded. No filtering, no sign adjustment.
+    - Product reconciliation to sku_erp uses the existing accepted
+      canonical bridge (src/reconcile.py), applied upstream when
+      fact_sales was built. It is not re-evaluated here.
+
+    Cost (closed Q4 rules):
+    - Source: fact_product_cost (fecha_vigencia -> effective_date,
+      costo_mxn -> cost_mxn), the full, non-collapsed cost history.
+    - costo_mxn is treated as a per-unit product cost.
+    - The applicable cost for a sale is the latest cost_history row for
+      that sale's sku_erp where effective_date <= the sale's calendar
+      date. No future cost may ever be used.
+    - transaction_cost_mxn = cantidad * applicable_costo_mxn
+    - transaction_margin_mxn = monto - transaction_cost_mxn
+
+    Grain: store_id + sku_erp. Over the full period:
+        revenue_mxn = SUM(monto)
+        cost_mxn    = SUM(cantidad * applicable_costo_mxn)
+        margin_mxn  = revenue_mxn - cost_mxn
+        margin_pct  = margin_mxn / revenue_mxn * 100
+
+    Qualification rule: margin_mxn < 0. margin_mxn (not margin_pct) is
+    the authoritative qualification rule, since revenue is positive and
+    margin_pct should carry the same sign.
+
+    Data integrity:
+    - If any physical sale in the period has no applicable cost row
+      (no cost_history entry with effective_date <= sale date for its
+      sku_erp), this function raises ValueError rather than silently
+      defaulting that sale's cost to zero or dropping the sale.
+    """
+
+    connection = duckdb.connect(
+        str(database_path),
+        read_only=True,
+    )
+
+    try:
+        # ------------------------------------------------------------
+        # Data-integrity gate: every physical sale in the period must
+        # resolve to an applicable cost. A sale with no cost_history
+        # row at or before its sale date is a data-integrity failure,
+        # not a zero-cost default.
+        # ------------------------------------------------------------
+        integrity_query = """
+        WITH q4_window AS (
+            SELECT
+                DATE '2024-10-01' AS start_date,
+                DATE '2026-03-31' AS end_date
+        ),
+
+        physical_sales AS (
+            SELECT
+                s.transaction_id,
+                s.product_id,
+                CAST(s.sold_at AS DATE) AS sale_date
+            FROM fact_sales AS s
+            CROSS JOIN q4_window AS w
+
+            WHERE s.channel = 'physical'
+                AND CAST(s.sold_at AS DATE)
+                    BETWEEN w.start_date AND w.end_date
+        ),
+
+        cost_matches AS (
+            SELECT
+                ps.transaction_id,
+                ps.product_id,
+                c.cost_mxn AS applicable_cost_mxn,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ps.transaction_id
+                    ORDER BY c.effective_date DESC
+                ) AS rn
+            FROM physical_sales AS ps
+            LEFT JOIN fact_product_cost AS c
+                ON c.product_id = ps.product_id
+                AND c.effective_date <= ps.sale_date
+        )
+
+        SELECT DISTINCT product_id
+        FROM cost_matches
+        WHERE rn = 1
+            AND applicable_cost_mxn IS NULL
+        ORDER BY product_id
+        """
+
+        unresolved = connection.execute(
+            integrity_query
+        ).fetchdf()
+
+        if not unresolved.empty:
+            raise ValueError(
+                "Q4 data-integrity failure: no applicable "
+                "cost_history entry (fecha_vigencia <= sale date) "
+                "exists for one or more physical sales of the "
+                "following sku_erp product(s). Refusing to default "
+                "to zero cost or silently drop the affected sales: "
+                f"{sorted(unresolved['product_id'].tolist())}"
+            )
+
+        # ------------------------------------------------------------
+        # Main aggregation: store + sku_erp margin over the full
+        # period, using the same latest-applicable-cost resolution
+        # validated above.
+        # ------------------------------------------------------------
+        query = """
+        WITH q4_window AS (
+            SELECT
+                DATE '2024-10-01' AS start_date,
+                DATE '2026-03-31' AS end_date
+        ),
+
+        physical_sales AS (
+            SELECT
+                s.transaction_id,
+                s.store_id,
+                s.product_id,
+                CAST(s.sold_at AS DATE) AS sale_date,
+                s.quantity,
+                s.amount_native AS monto
+            FROM fact_sales AS s
+            CROSS JOIN q4_window AS w
+
+            WHERE s.channel = 'physical'
+                AND CAST(s.sold_at AS DATE)
+                    BETWEEN w.start_date AND w.end_date
+        ),
+
+        cost_matches AS (
+            SELECT
+                ps.transaction_id,
+                c.cost_mxn AS applicable_cost_mxn,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ps.transaction_id
+                    ORDER BY c.effective_date DESC
+                ) AS rn
+            FROM physical_sales AS ps
+            LEFT JOIN fact_product_cost AS c
+                ON c.product_id = ps.product_id
+                AND c.effective_date <= ps.sale_date
+        ),
+
+        best_cost AS (
+            SELECT
+                transaction_id,
+                applicable_cost_mxn
+            FROM cost_matches
+            WHERE rn = 1
+        ),
+
+        transaction_costed AS (
+            SELECT
+                ps.store_id,
+                ps.product_id,
+                ps.monto,
+                ps.quantity * bc.applicable_cost_mxn
+                    AS transaction_cost_mxn
+            FROM physical_sales AS ps
+
+            INNER JOIN best_cost AS bc
+                ON bc.transaction_id = ps.transaction_id
+        ),
+
+        agg AS (
+            SELECT
+                store_id,
+                product_id AS sku_erp,
+
+                SUM(monto) AS revenue_mxn,
+                SUM(transaction_cost_mxn) AS cost_mxn,
+                SUM(monto) - SUM(transaction_cost_mxn) AS margin_mxn
+
+            FROM transaction_costed
+
+            GROUP BY
+                store_id,
+                product_id
+        )
+
+        SELECT
+            a.store_id,
+            a.sku_erp,
+            p.product_name,
+            a.revenue_mxn,
+            a.cost_mxn,
+            a.margin_mxn,
+            ROUND(
+                a.margin_mxn / a.revenue_mxn * 100,
+                2
+            ) AS margin_pct
+
+        FROM agg AS a
+
+        LEFT JOIN dim_product AS p
+            ON p.product_id = a.sku_erp
+
+        WHERE a.margin_mxn < 0
+
+        ORDER BY
+            a.margin_mxn ASC
         """
 
         return connection.execute(query).fetchdf()

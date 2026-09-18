@@ -80,6 +80,7 @@ def run_pipeline(
         reconciled_ecommerce,
         sources["inventory"],
         product_bridge,
+        sources["exchange_rates"],
     )
 
     persist_analytical_model(

@@ -1,221 +1,129 @@
-
-Ese último punto es importante: **no fingimos que ya elegimos tecnología**.
-
----
-
-## 5. Crear `AI_LOG.md`
-
-Aquí sí debemos empezar desde hoy.
-
-Pon:
-
-```markdown
 # AI_LOG
 
-## Purpose
+## Propósito
 
-This document records how AI tools were used during the development of the CaféNorte Data Solutions Engineer technical challenge, including prompts, outputs, decisions, corrections, and validation performed by me.
-
----
-
-## Tools Used
-
-### ChatGPT
-- Model: GPT-5.6 Sol
-- Usage: planning, requirements analysis, technical discussion and review.
-
-Additional tools will be documented when they are actually used.
+Este documento registra cómo se usaron herramientas de IA durante el desarrollo del reto técnico de Data Solutions Engineer para CaféNorte: qué se pidió, qué respondió la IA, qué decisión tomé con cada respuesta y por qué. La responsabilidad final sobre el pipeline, las definiciones de negocio y los resultados publicados en README.md es mía.
 
 ---
 
-## Workflow
+## 1. Herramientas utilizadas
 
-The project started with a requirements review before inspecting or transforming the source datasets.
+- **Claude Code**, en una sesión principal de orquestación (modelo/versión no registrado de forma verificable) que delegó tareas acotadas a subagentes especializados de solo lectura, cada uno con mandato de independent agent review sobre un aspecto distinto del pipeline o de la definición de negocio:
+  - **Workflow Architect** — auditoría independiente de la base de datos/pipeline, y resolución final de la definición de Q1.
+  - **Data Engineer** — segunda revisión independiente de la base de datos, ingesta y reconciliación.
+  - **Supply Chain Strategist** — revisión de la definición de negocio de "rotación de inventario" para Q1.
+  - **Analytics Reporter** — revisión adversarial/independiente de la propuesta anterior.
+- **ChatGPT**, usado como apoyo de razonamiento y planeación general del reto (separación de entregables, secuencia de trabajo). Modelo/versión no registrado de forma verificable; no se afirma una versión específica.
 
-The initial decision was to separate:
-
-- project planning and technical review;
-- local implementation and execution;
-- AI-assisted development;
-- human validation of outputs.
-
-No data transformation or technology stack was selected before inspecting the available sources.
+No se listan otros agentes especializados (p. ej. Code Reviewer, Project Manager) porque no hay evidencia en el historial del proyecto de que hayan sido invocados para este reto.
 
 ---
 
-## Key Prompts
+## 2. Flujo de trabajo / orquestación
 
-### Prompt 1 — Project planning
+La sesión principal (yo, como responsable de decisión) actuó como orquestador: nunca aceptó una conclusión de negocio de un subagente solo porque el código corriera o los tests pasaran. El patrón seguido, de forma consistente en las decisiones ambiguas, fue:
 
-**Prompt**
+**hecho observado → interpretación → decisión metodológica → implementación → tests → validación de reconstrucción limpia.**
 
-I asked ChatGPT to read only the technical challenge document, without analyzing the datasets, and create a plan strictly based on the requirements in the document.
+Para las decisiones donde la semántica de negocio era ambigua (agregación de inventario en Q1, tratamiento de `N/A`, inclusión de Shopify, `tipo_comprobante`, margen en Q4), se comisionaron revisiones independientes de segunda opinión a un tipo de agente distinto del que produjo la primera propuesta, con mandato explícito de cuestionarla en lugar de confirmarla. En al menos dos casos documentados (inclusión de Shopify en Q1, y una verificación posterior de cobertura de reconciliación para Q4) la primera conclusión resultó incorrecta y fue revertida por evidencia nueva, no aceptada por defecto (ver sección 4).
 
-**AI response summary**
-
-ChatGPT separated the challenge into:
-- functional pipeline;
-- technical AWS proposal;
-- AI usage log;
-- interview/demo preparation.
-
-It also proposed using the local Git repository as the development environment and keeping AI usage documented throughout the project.
-
-**Decision**
-
-Modified / accepted.
-
-**Reason**
-
-The proposed workflow matches the required deliverables, while implementation decisions were intentionally postponed until the source datasets are inspected.
-
-### Prompt 2 — Source discovery
-
-**Prompt**
-
-I asked the Claude Code Data Engineer agent to profile only the three challenge sources (`sales.csv`, `inventory.json`, and `ecommerce_orders.parquet`) without modifying data, selecting a technology stack, designing the pipeline, or proposing cloud infrastructure.
-
-The agent was explicitly instructed to separate observed facts from interpretations and report schemas, counts, date coverage, identifiers, nulls, duplicates, currencies, potential reconciliation fields, and observed data-quality issues.
-
-**AI response summary**
-
-The agent identified:
-
-- 86,490 physical sales rows.
-- 9,947 e-commerce order rows.
-- 230,776 inventory snapshots.
-- 40 stores shared between POS and ERP.
-- Different product identifiers across systems (`sku`, `sku_erp`, and `product_handle`).
-- An incomplete SKU mapping bridge.
-- 4,417 inventory records with `"N/A"` instead of numeric stock.
-- Multiple currencies in e-commerce.
-- No physical store identifier in e-commerce.
-- Partial date coverage across sources.
-
-**Decision**
-
-Accepted after independent validation of the critical findings.
-
-**Validation**
-
-I created and executed a local Python validation script against the original source files. It independently confirmed the critical row counts, date ranges, identifier cardinalities, mapping coverage, missing mappings, inventory `"N/A"` count, currencies, duplicate-key checks, store overlap, and cross-source date overlap.
-
-No discrepancy was found in the critical facts used for subsequent design decisions.
-
-### Prompt 3 — Independent cold review
-
-**Prompt**
-
-I asked a Claude Code Code Reviewer agent to perform a cold audit of the repository using only the challenge materials, source data, and repository contents.
-
-The reviewer was asked to identify reasoning gaps, hidden assumptions, reproducibility problems, incorrect data-model decisions, and implementation risks without modifying the project.
-
-**AI response summary**
-
-The review identified a discrepancy in the product reconciliation logic.
-
-The documented strategy was:
-
-1. Use explicit mappings from `sku_mappings` first.
-2. Use the validated numeric pattern only as a fallback.
-
-However, the implementation was deriving product relationships from the numeric pattern first and using `sku_mappings` only to label whether the resulting relationship was explicit or inferred.
-
-The reviewer also identified reproducibility issues such as uncommitted pipeline files and missing dependency documentation.
-
-**Decision**
-
-Accepted and corrected the reconciliation finding.
-
-`src/reconcile.py` was changed so that explicit mappings are now actually used first. Numeric-pattern inference is only used when an explicit ERP relationship is unavailable.
-
-The pipeline was executed again after the correction.
-
-**Validation**
-
-The corrected implementation produced the same results on the supplied dataset:
-
-- 70 canonical products
-- 60 explicit POS mappings
-- 10 inferred POS mappings
-- 23 explicit Shopify mappings
-- 10 inferred Shopify mappings
-- 0 unreconciled POS sales rows
-- 0 unreconciled Shopify rows
-
-This confirmed that the previous implementation happened to produce the correct result for the supplied data, but did not correctly implement the intended reconciliation hierarchy.
-
-**Why this mattered**
-
-The independent review detected a reasoning and implementation gap that was not visible from the final row counts alone. The correction made the code consistent with the documented reconciliation decision rather than relying on an accidental property of the current dataset.
+No se narra aquí la secuencia completa de todas las revisiones internas realizadas durante el desarrollo; se documentan solo los prompts y decisiones más representativos.
 
 ---
 
-## Validation and Decision Notes
+## 3. Prompts clave
 
-### Product identifier reconciliation
+### Prompt 1 — Fundamento de datos y reconciliación de producto
 
-During review of the source-discovery results, ChatGPT suggested investigating whether the numeric component embedded in the POS, ERP, and Shopify product identifiers could be used to reconcile records missing from the explicit `sku_mappings` table.
+**Prompt (resumen del mandato encomendado, independent agent review):**
+Auditoría independiente y de solo lectura del pipeline de datos (`src/load.py`, `src/reconcile.py`, `src/transform.py`, `src/pipeline.py`), recalculando cada cifra directamente desde los archivos crudos y la base DuckDB persistida, sin modificar ningún archivo del repositorio.
 
-I did not accept this relationship based only on the identifiers looking similar.
+**Resumen de la respuesta de la IA:**
+Confirmó que el orden "explícito primero, numérico como fallback" sí estaba implementado en el código. Encontró que `exchange_rates.csv` existía en `data/raw/` pero no estaba documentado ni usado por el pipeline, pese a ser necesario para normalizar ingresos de e-commerce en moneda distinta a MXN. También identificó 4 filas de `sku_mappings` con `sku_erp` nulo que quedaban descartadas del bucket "explícito" y caían al fallback numérico.
 
-Two additional local validation steps were performed against the original datasets:
+**Mi acción:** ACEPTADO (para `exchange_rates.csv`) / registrado como limitación conocida (para las 4 filas con `sku_erp` nulo, sin cambiar el comportamiento porque el resultado numérico coincide).
 
-1. **Known-mapping validation**
-   - 60/60 known POS → ERP mappings had matching numeric components.
-   - 27/27 known POS → Shopify mappings had matching numeric components.
-   - 23/23 rows containing all three identifiers were consistent.
-   - All currently unmapped POS SKUs and Shopify handles resolved to exactly one ERP product candidate.
-
-2. **Collision/conflict validation**
-   - All POS, ERP, and Shopify product identifiers were parseable using the observed identifier formats.
-   - No numeric identifier collisions were found within any of the three systems.
-   - No explicit mapping in the source data contradicted the numeric relationship.
-
-**Decision**
-
-Use the explicit source mapping first. Where it is missing, allow a numeric-component fallback only when it resolves to exactly one ERP product and does not conflict with an explicit mapping.
-
-The ERP SKU is used as the canonical product identifier.
-
-Fuzzy matching based on product names was deliberately rejected because the deterministic identifier relationship was supported by the provided data and is easier to validate and audit.
-
-**Human validation**
-
-The rule was accepted only after running the validation locally against the original source files. The inference is scoped to the datasets provided for the challenge and is not assumed to be a permanent upstream business rule.
-
+**Por qué:** las cifras fueron recalculadas de forma independiente contra los archivos crudos, no tomadas de README/AI_LOG. `exchange_rates.csv` fue incorporado como fuente de primer nivel (ver README, sección 1) porque el dueño del reto confirmó que es material oficial requerido para Q3.
 
 ---
 
-## AI Errors / Suboptimal Suggestions
+### Prompt 2 — Definición de "rotación de inventario" en Q1 (doble revisión independiente)
 
-### AI error — Shopify reconciliation merge
+**Prompt (resumen del mandato encomendado, doble independent agent review):**
+Se pidió una revisión de negocio (Supply Chain Strategist) sobre si la fórmula de rotación de inventario usada era defendible dado los datos reales, y después una segunda revisión (Analytics Reporter) con mandato de cuestionar de forma adversarial la primera, recalculando cada cifra desde cero contra la base DuckDB.
 
-ChatGPT initially suggested merging Shopify orders against the complete product bridge using `validate="many_to_one"`.
+**Resumen de la respuesta de la IA:**
+Ambas revisiones reprodujeron de forma independiente el mismo Top 10 y coincidieron en la fórmula (`unidades vendidas / inventario promedio`), pero la segunda revisión señaló que publicar el Top 10 sin advertir que 54.17% de las unidades físicas quedan fuera del cálculo (por no tener serie de inventario observable) sobreestimaría la precisión del resultado.
 
-The implementation failed because the canonical bridge contains all 70 ERP products, while only 33 are observed in Shopify. Products without a Shopify identifier therefore produced multiple `NaN` values in the merge key, which pandas correctly rejected as non-unique.
+**Mi acción:** ACEPTADO, con la advertencia de cobertura incorporada como limitación explícita (ver README, sección 5 y A3).
 
-**Detection**
-
-The error was detected by executing the reconciliation code locally. Pandas raised a `MergeError` indicating that the right-side merge key was not unique.
-
-**Correction**
-
-The Shopify reconciliation step was changed to filter the product bridge to rows with a non-null `product_handle` before performing the `many_to_one` merge.
-
-The validation constraint was kept rather than removed, because it provides protection against genuinely ambiguous Shopify mappings.
-
-**Result**
-
-After the correction:
-
-- 70 canonical ERP products were preserved in the bridge.
-- 33 Shopify product handles were reconciled.
-- 0 Shopify order rows remained unreconciled.
-- 0 POS sales rows remained unreconciled.
+**Por qué:** las dos revisiones llegaron al mismo número de forma independiente desde datos crudos; la discrepancia relevante no era numérica sino de qué debía divulgarse junto con el resultado.
 
 ---
 
-## Final Self-Critique
+### Prompt 3 — Evidencia sobre `tipo_comprobante`
 
-To be completed at the end of the challenge.
+**Prompt (resumen del mandato encomendado, targeted validation):**
+Revisión enfocada únicamente en si los códigos I/E/P/N/T de `sales.csv.tipo_comprobante` debían filtrarse o invertirse en signo para Q1, buscando evidencia estadística, temporal o documental que distinguiera a E/P/N/T de una venta ordinaria.
+
+**Resumen de la respuesta de la IA:**
+No encontró ninguna señal (distribución de cantidad/monto, patrón horario, patrón por tienda/SKU, pares de reversión exacta) que distinguiera a E/P/N/T de I. Recomendó contar los cinco códigos como registrados, sin filtrar ni invertir signo, dejando el estatus semántico como abierto para autoridad externa.
+
+**Mi acción:** ACEPTADO.
+
+**Por qué:** la ausencia de evidencia para una interpretación alternativa es, en sí, evidencia suficiente para no introducir una regla de negocio no soportada por los datos (principio ya aplicado en A7 de README).
+
+---
+
+### Prompt 4 — Validación de reproducibilidad end-to-end
+
+**Prompt (excerpt):**
+Reconstruir `cafenorte.duckdb` desde cero a partir de las cuatro fuentes crudas (`sales.csv`, `inventory.json`, `ecommerce_orders.parquet`, `exchange_rates.csv`) y confirmar que Q1–Q4 y la suite de pytest se reproducen exactamente como están documentados en README.
+
+**Resumen de la respuesta de la IA:**
+Ejecución de `scripts/run_pipeline.py` seguida de `pytest -q` contra la base recién reconstruida; confirmó 36 tests pasando y los cuatro resultados de negocio (Q1–Q4) idénticos a los publicados.
+
+**Mi acción:** ACEPTADO — usado como el gate final antes de considerar cualquier resultado como definitivo.
+
+**Por qué:** cierra el ciclo entre lo documentado y lo que el pipeline realmente produce desde una reconstrucción limpia; no se encontró ninguna discrepancia.
+
+---
+
+## 4. Caso de error de IA (obligatorio)
+
+### Caso principal — premisa incorrecta sobre e-commerce y tienda física (Q1, Shopify)
+
+De forma repetida, la IA introdujo la premisa de que las órdenes de e-commerce debían poder asignarse o conectarse a una tienda física para poder participar en Q1. Esa premisa contaminó el análisis de inclusión de Shopify y produjo, en una revisión independiente dedicada a este punto, una recomendación explícita de **excluir** las unidades de e-commerce del numerador de rotación de inventario, argumentando que no existe un "pool" de inventario e-commerce vinculable al inventario por tienda.
+
+**Por qué era incorrecto:**
+- Q1 pide el Top 10 de SKUs, no una atribución de e-commerce a nivel tienda.
+- Los productos de e-commerce reconcilian de forma completa al SKU canónico (`sku_erp`); la identidad del producto no depende de una tienda.
+- Los datos suministrados no contienen ningún requisito de modelar e-commerce como una tienda física.
+- La ausencia de `store_id` en `ecommerce_orders.parquet` no demuestra por sí misma que el canal deba excluirse de un numerador definido a nivel SKU.
+
+**Corrección:** la conclusión de la Auditoría 17 fue **rechazada**. E-commerce se trata como canal independiente; sus unidades participan en Q1 a nivel SKU (ver README, sección 5); no se realiza ninguna asignación a tienda física ni inferencia de punto de cumplimiento (fulfillment) para e-commerce.
+
+Esta corrección se detectó por revisión humana de la granularidad analítica y de la evidencia de origen — no por un test unitario que fallara. Es un ejemplo claro de que el código y los tests pueden ser técnicamente correctos mientras la interpretación de negocio es incorrecta.
+
+### Caso secundario — cobertura de reconciliación mal reportada (Q4)
+
+En una revisión posterior orientada a Q4, un agente examinó únicamente las filas explícitas de `sku_mappings` y reportó 10/70 SKUs de POS sin mapear, contradiciendo la reconciliación canónica ya aceptada (explícito primero, con fallback numérico validado). Una verificación puntual con el agente Data Engineer, aplicando la misma jerarquía explícito-primero + fallback numérico ya validada, mostró 70/70 SKUs reconciliados y 0 filas sin reconciliar. La población corregida sacó a la luz un tercer SKU con margen negativo que la cifra errónea de cobertura había dejado fuera (ver README, sección 8: 3 SKUs, 40/40 tiendas cada uno).
+
+Este segundo caso no quedó registrado en una revisión independiente separada; se documenta aquí como parte del historial de correcciones de esta sesión, no como cita de un documento adicional.
+
+---
+
+## 5. Prácticas de validación
+
+- Perfilado de las fuentes a nivel de origen (conteos, esquemas, cardinalidades, nulos) recalculado de forma independiente contra los archivos crudos, no solo leído del código o de reportes previos.
+- Revisiones independientes de agentes distintos para semántica ambigua (rotación de inventario, `N/A`, inclusión de Shopify, `tipo_comprobante`), con mandato de cuestionar la conclusión previa.
+- Pruebas dirigidas a casos límite (valores `N/A` en inventario, pares tienda-SKU ausentes, códigos de `tipo_comprobante` distintos de I) antes de fijar el tratamiento definitivo.
+- 36 tests de pytest pasando sobre la implementación final.
+- Reconstrucción limpia (`scripts/run_pipeline.py`) desde las cuatro fuentes crudas, con Q1–Q4 reproducidos exactamente desde la base DuckDB recién generada.
+- Ningún resultado analítico esperado está hardcodeado en la lógica de negocio (`src/business_questions.py`); los valores conocidos se usaron como objetivo de validación externo, no como parte del cálculo.
+
+---
+
+## 6. Autocrítica final
+
+La IA aceleró de forma real el perfilado de fuentes, la exploración de definiciones alternativas, la implementación del pipeline, la generación de tests y la verificación independiente de cifras; sin ella, cubrir la profundidad de ambigüedades de negocio de este reto en el tiempo disponible no habría sido realista. Pero la corrección del resultado final no dependió de que el pipeline corriera o los tests pasaran, sino de decidir qué supuestos eran aceptables, cuestionar interpretaciones causales o de negocio que no tenían soporte en los datos suministrados, rechazar recomendaciones de IA cuando la evidencia no las sostenía (caso Shopify en Q1, cobertura de reconciliación en Q4) y fijar el alcance analítico final. No afirmo haber escrito todo el código a mano — gran parte de la implementación, los tests y las revisiones fueron asistidos por IA — pero la responsabilidad de que la interpretación de negocio coincidiera con la pregunta y con la evidencia disponible, y no solo con lo que técnicamente compilaba, fue mía.

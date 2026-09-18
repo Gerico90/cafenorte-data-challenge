@@ -18,3 +18,8 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Internal/local working files (not part of the public submission)
+docs/audits/
+agent_profiles.txt
+agent_profiles_business.txt

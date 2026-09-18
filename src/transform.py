@@ -320,6 +320,63 @@ def build_fact_product_cost(
 
 
 # ---------------------------------------------------------------------
+# FACT EXCHANGE RATE
+# ---------------------------------------------------------------------
+
+def build_fact_exchange_rate(
+    exchange_rates: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build the daily currency exchange rate fact table.
+
+    Grain: one row per (rate_date, currency). Rates are used to convert
+    non-MXN transaction amounts to MXN by matching on the transaction's
+    calendar date and currency -- never averaged, interpolated, or
+    otherwise altered.
+    """
+
+    required = {
+        "fecha",
+        "currency",
+        "rate_to_mxn",
+    }
+
+    _require_columns(
+        exchange_rates,
+        required,
+        "exchange_rates",
+    )
+
+    fact_exchange_rate = pd.DataFrame({
+        "rate_date": pd.to_datetime(
+            exchange_rates["fecha"],
+            errors="raise",
+        ).dt.date,
+        "currency": exchange_rates["currency"],
+        "rate_to_mxn": pd.to_numeric(
+            exchange_rates["rate_to_mxn"],
+            errors="raise",
+        ),
+    })
+
+    if fact_exchange_rate.duplicated(
+        subset=["rate_date", "currency"]
+    ).any():
+        raise ValueError(
+            "exchange_rates contains multiple rates for the same "
+            "date and currency. Refusing to silently pick one -- "
+            "this is a data-integrity issue that must be resolved "
+            "upstream."
+        )
+
+    return (
+        fact_exchange_rate
+        .sort_values(["rate_date", "currency"])
+        .reset_index(drop=True)
+    )
+
+
+# ---------------------------------------------------------------------
 # COMPLETE ANALYTICAL MODEL
 # ---------------------------------------------------------------------
 
@@ -328,6 +385,7 @@ def build_analytical_model(
     reconciled_ecommerce: pd.DataFrame,
     inventory: dict,
     product_bridge: pd.DataFrame,
+    exchange_rates: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
     """Build all normalized analytical tables."""
 
@@ -347,5 +405,8 @@ def build_analytical_model(
         ),
         "fact_product_cost": build_fact_product_cost(
             inventory
+        ),
+        "fact_exchange_rate": build_fact_exchange_rate(
+            exchange_rates
         ),
     }

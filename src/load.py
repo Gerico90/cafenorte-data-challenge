@@ -39,10 +39,19 @@ def load_inventory(path: Path | None = None) -> dict:
         return json.load(file)
 
 
+def load_exchange_rates(path: Path | None = None) -> pd.DataFrame:
+    """Load the raw daily exchange rate CSV without applying transformations."""
+    source_path = path or RAW_DATA_DIR / "exchange_rates.csv"
+    _require_file(source_path)
+
+    return pd.read_csv(source_path)
+
+
 def load_sources() -> dict:
-    """Load all three challenge sources."""
+    """Load all four challenge sources."""
     return {
         "sales": load_sales(),
         "ecommerce": load_ecommerce(),
         "inventory": load_inventory(),
+        "exchange_rates": load_exchange_rates(),
     }

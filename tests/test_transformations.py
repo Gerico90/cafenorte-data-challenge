@@ -1,9 +1,11 @@
 import pandas as pd
+import pytest
 
 from src.transform import (
     build_fact_sales,
     build_fact_inventory,
     build_fact_product_cost,
+    build_fact_exchange_rate,
 )
 
 
@@ -133,3 +135,30 @@ def test_product_cost_preserves_full_history():
     assert result.iloc[1]["effective_date"] == pd.Timestamp(
         "2026-01-01"
     )
+
+
+def test_build_fact_exchange_rate_preserves_rows():
+    exchange_rates = pd.DataFrame({
+        "fecha": ["2025-04-01", "2025-04-01"],
+        "currency": ["USD", "EUR"],
+        "rate_to_mxn": [17.5, 20.3],
+    })
+
+    result = build_fact_exchange_rate(exchange_rates)
+
+    assert len(result) == 2
+
+    usd_row = result[result["currency"] == "USD"].iloc[0]
+    assert usd_row["rate_to_mxn"] == pytest.approx(17.5)
+    assert usd_row["rate_date"] == pd.Timestamp("2025-04-01").date()
+
+
+def test_build_fact_exchange_rate_rejects_duplicate_date_currency():
+    exchange_rates = pd.DataFrame({
+        "fecha": ["2025-04-01", "2025-04-01"],
+        "currency": ["USD", "USD"],
+        "rate_to_mxn": [17.5, 17.9],
+    })
+
+    with pytest.raises(ValueError):
+        build_fact_exchange_rate(exchange_rates)
